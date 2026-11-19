@@ -7,14 +7,16 @@
   "scripts": {
     "build": "node scripts/build-backend.mjs",
     "typecheck": "node scripts/typecheck.mjs",
-    "test:backend": "node scripts/smoke-backend.mjs"
+    "test:backend": "node scripts/smoke-backend.mjs",
+    "release": "node scripts/release.mjs"
   },
   "dependencies": {
-    "@pi/plugin-sdk": "file:../../packages/plugin-sdk",
+    "@pi/plugin-sdk": "^0.1.0",
     "tldts": "^7.4.19"
   },
   "devDependencies": {
     "@types/node": "^26.6.3",
-    "esbuild": "^0.24.0"
+    "esbuild": "^0.24.0",
+    "adm-zip": "^0.6.1"
   }
 }
