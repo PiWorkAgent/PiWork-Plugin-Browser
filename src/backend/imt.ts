@@ -542,6 +542,83 @@ export function parseExplain(raw: string): ExplainDoc | null {
   }
 }
 
+export interface AnalyzeEvidence {
+  claim: string;
+  support: string;
+  /** 强 / 中 / 弱 — empty when the model gave nothing usable. */
+  strength: string;
+}
+export interface AnalyzeDoc {
+  thesis: string;
+  structure: string[];
+  evidence: AnalyzeEvidence[];
+  assumptions: string[];
+  gaps: string[];
+  verdict: string;
+}
+
+/**
+ * 分析 answers a different question from 解释: not "what does this say" but
+ * "is it any good". The model returns a JSON object; fences and stray prose
+ * are tolerated, the same way `parseExplain` handles them.
+ */
+export function parseAnalyze(raw: string): AnalyzeDoc | null {
+  let text = String(raw ?? '').trim();
+  text = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start < 0 || end <= start) return null;
+  try {
+    const parsed = JSON.parse(text.slice(start, end + 1)) as Record<string, unknown>;
+    if (!parsed || typeof parsed !== 'object') return null;
+    const str = (v: unknown): string => String(v ?? '').trim();
+    const list = (v: unknown, max: number): string[] =>
+      Array.isArray(v)
+        ? v
+            .map((item) => str(item))
+            .filter(Boolean)
+            .slice(0, max)
+        : [];
+    const thesis = str(parsed.thesis);
+    const structure = list(parsed.structure, 5);
+    const evidence = (Array.isArray(parsed.evidence) ? parsed.evidence : [])
+      .map((item) => {
+        const rec = (item ?? {}) as Record<string, unknown>;
+        const strength = str(rec.strength);
+        return {
+          claim: str(rec.claim),
+          support: str(rec.support),
+          strength: /^[强中弱]$/.test(strength) ? strength : '',
+        };
+      })
+      .filter((item) => item.claim || item.support)
+      .slice(0, 6);
+    const assumptions = list(parsed.assumptions, 4);
+    const gaps = list(parsed.gaps, 4);
+    const verdict = str(parsed.verdict);
+    if (!thesis && structure.length === 0 && !verdict) return null;
+    return { thesis, structure, evidence, assumptions, gaps, verdict };
+  } catch {
+    return null;
+  }
+}
+
+/** One string for 朗读 / 收藏 / 继续追问, in reading order. */
+export function analyzePlainText(doc: AnalyzeDoc): string {
+  const parts: string[] = [];
+  if (doc.thesis) parts.push(doc.thesis);
+  parts.push(...doc.structure);
+  for (const item of doc.evidence) {
+    const line = [item.claim, item.support, item.strength ? `证据强度：${item.strength}` : '']
+      .filter(Boolean)
+      .join('，');
+    if (line) parts.push(line);
+  }
+  parts.push(...doc.assumptions, ...doc.gaps);
+  if (doc.verdict) parts.push(doc.verdict);
+  return parts.join('。');
+}
+
 /** Title + paragraphs as one prompt; capped so a long article stays in budget. */
 export function buildExplainPrompt(article: unknown): string {
   const doc = (article ?? {}) as { title?: unknown; blocks?: Array<{ text?: unknown }> };

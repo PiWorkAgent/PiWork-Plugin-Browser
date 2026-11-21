@@ -23,6 +23,8 @@ const CLIPS_KEY = 'clips.items';
 
 /** What chat.send said — the agent half of the selection-popup round trip. */
 const sentChats = [];
+/** Full chat.send params, for the request-card fields the conversation renders. */
+const sentChatParams = [];
 const voiceCalls = [];
 
 /**
@@ -30,9 +32,52 @@ const voiceCalls = [];
  * ONLY channel into the page, so the fake reads the expression to tell which
  * injected global it touches, and answers the way the real page would.
  */
-const fakePage = { installed: false, action: null, notes: [], toasts: [], clips: [], disabled: 0, theme: null };
+const fakePage = {
+  installed: false,
+  action: null,
+  notes: [],
+  toasts: [],
+  clips: [],
+  disabled: 0,
+  theme: null,
+  /** The last payload the whole-page drawer was opened with. */
+  insight: null,
+  /** The last reply the agent's browser_show routed into the drawer. */
+  reply: null,
+  /** A pending drawer-button click for the imt overlay poll. */
+  imtAction: null,
+};
 
 function fakeEvaluate(expression) {
+  // ── Whole-page runtime (__piImt) ──
+  // The install source also mentions extractArticle/showExplain, so match the
+  // call shapes (`__piImt.x ?`) rather than the bare names.
+  if (expression.includes('window.__piImt = api')) return 'installed';
+  if (expression.includes('__piImt.extractArticle ?')) {
+    return {
+      title: '远程办公值得吗',
+      blocks: [
+        { text: '一项 2024 年的行业调查显示，远程办公让参与公司的产出提升了 13%。' },
+        { text: '两家科技公司提供了各自的案例，并回应了“协作变差”的质疑。' },
+      ],
+    };
+  }
+  if (expression.includes('__piImt.showExplain ?')) {
+    const m = expression.match(/showExplain\((\{.*\})\)/s);
+    fakePage.insight = m ? JSON.parse(m[1]) : null;
+    return true;
+  }
+  if (expression.includes('__piImt.showReply ?')) {
+    const m = expression.match(/showReply\((\{.*\})\)/s);
+    fakePage.reply = m ? JSON.parse(m[1]) : null;
+    return true;
+  }
+  if (expression.includes('__piImt.pollOverlay ?')) {
+    const action = fakePage.imtAction;
+    fakePage.imtAction = null;
+    return { action, panel: true };
+  }
+  if (expression.includes('__piImt.showToast ?')) return true;
   // Order matters: the inject source also mentions __piSelDisable (it defines
   // it), so the install/disable checks must be anchored on their own shapes.
   if (expression.includes('data-pi-sel-host')) {
@@ -191,7 +236,28 @@ function handleFromBackend(msg) {
           // The composed instruction is `agentText`; `text` is only the
           // user-facing question shown on the card.
           sentChats.push(String(msg.params.agentText ?? msg.params.text ?? ''));
+          sentChatParams.push(msg.params);
           sendToBackend({ type: 'call-result', id: msg.id, result: { ok: true } });
+          break;
+        case 'ai.complete':
+          // The 分析 prompt asks for the critical-reading JSON object; the
+          // translation prompt gets an empty array (only the shape matters).
+          sendToBackend({
+            type: 'call-result',
+            id: msg.id,
+            result: {
+              text: /阅读分析师/.test(String(msg.params.system ?? ''))
+                ? JSON.stringify({
+                    thesis: '远程办公整体提升产出，但证据集中在科技行业。',
+                    structure: ['先给行业调查', '再举公司案例'],
+                    evidence: [{ claim: '产出提升 13%', support: '2024 年行业调查', strength: '中' }],
+                    assumptions: ['员工在家同样自律'],
+                    gaps: ['未讨论跨行业差异'],
+                    verdict: '可作为参考，不宜外推到所有行业。',
+                  })
+                : '[]',
+            },
+          });
           break;
         case 'voice.speak':
           voiceCalls.push(msg.params);
@@ -731,6 +797,42 @@ await panelRequest('s3', 'settings.setSelPopup', { on: true });
 fakePage.installed = false;
 await new Promise((r) => setTimeout(r, 900));
 check('a page that lost the popup gets it back on the next poll', fakePage.installed === true, JSON.stringify(fakePage));
+
+// ── Whole-page 分析 (a silent one-shot model call) ──
+const analyzeReq = await panelRequest('a1', 'imt.analyze', {});
+check(
+  '整页分析 runs ai.complete with the analyst prompt and opens the drawer',
+  analyzeReq?.ok === true &&
+    calls.some((c) => c.method === 'ai.complete' && /阅读分析师/.test(String(c.params.system))) &&
+    fakePage.insight?.title === '整页分析' &&
+    fakePage.insight?.sections?.some((s) => s.h === '证据' && s.items.length > 0),
+  JSON.stringify({ result: analyzeReq?.result, insight: fakePage.insight }),
+);
+
+// The drawer's composer hands the question (with page + analysis) to the agent.
+fakePage.imtAction = { action: 'insight-ask', text: '这个结论能外推吗？', at: Date.now() };
+await new Promise((r) => setTimeout(r, 700));
+check(
+  '抽屉里的提问交给 agent，并要求用 browser_show 回到抽屉',
+  sentChats.some((text) => text.includes('这个结论能外推吗？') && text.includes('browser_show')),
+  sentChats[sentChats.length - 1],
+);
+const askParams = sentChatParams[sentChatParams.length - 1];
+check(
+  '追问卡片带问题正文、分析摘要和按能力区分的标题',
+  askParams?.text === '这个结论能外推吗？' &&
+    /整页分析/.test(String(askParams?.title ?? '')) &&
+    /远程办公/.test(String(askParams?.quote ?? '')),
+  JSON.stringify(askParams),
+);
+
+// ...and the agent's answer is routed back into the drawer instead of the card.
+await callTool('browser_show', { text: '样本集中在科技行业，不宜外推。', kind: 'chat', title: '回答' });
+check(
+  'agent 的回答通过 browser_show 回到抽屉',
+  fakePage.reply?.state === 'done' && /不宜外推/.test(fakePage.reply?.text ?? ''),
+  JSON.stringify(fakePage.reply),
+);
 
 const stateReq3 = await panelRequest('s4', 'state.get');
 check(

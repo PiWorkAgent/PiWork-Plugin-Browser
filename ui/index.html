@@ -67,17 +67,30 @@
     #toolbar button:disabled:hover { background: transparent; }
     #btn-star.on { color: hsl(43 90% 62%); }
 
-    /* Whole-page translation: the menu is a NATIVE popup (piSDK.showPopupMenu),
-       because a DOM dropdown would be covered by the engine view below. */
-    #btn-imt {
+    /* Whole-page tools: their controls live in a real toolbar row, because a
+       DOM dropdown would be covered by the engine view below. The trigger is a
+       sparkle, not a language glyph — the row is 翻译 / 朗读 / 解释 / 分析 /
+       存正文, and a 文A icon read as "translation only". The caret is its own
+       tiny SVG (a text ▾ sat off-centre next to a 2px-stroke icon). */
+    /* `#toolbar button` sets width/padding at id+element specificity, so the
+       override has to carry an id too or the 28px square wins and the caret
+       spills outside the hover pill. */
+    #toolbar #btn-imt {
       width: auto;
-      padding: 0 8px;
-      font: 600 12px/1 inherit;
-      letter-spacing: 0.02em;
+      padding: 0 6px;
+      gap: 1px;
     }
+    #btn-imt .imt-caret {
+      width: 10px;
+      height: 10px;
+      stroke-width: 2.5;
+      opacity: 0.65;
+      transition: transform 0.15s;
+    }
+    #btn-imt.open .imt-caret { transform: rotate(180deg); }
     #btn-imt.on { background: hsl(var(--accent, 221 19% 17%)); color: hsl(var(--foreground, 210 20% 92%)); }
     #btn-imt.busy { color: hsl(43 90% 62%); }
-    /* Second toolbar row: all whole-page controls live here, above the engine
+    /* Second toolbar row: all whole-page tools live here, above the engine
        view, so nothing is ever covered by the page. */
     #imt-row {
       flex: none;
@@ -491,7 +504,7 @@
     <button id="btn-forward" title="前进" aria-label="前进"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg></button>
     <button id="btn-reload" title="刷新" aria-label="刷新"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg></button>
     <button id="btn-star" title="收藏此页" aria-label="收藏此页" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></button>
-    <button id="btn-imt" title="整页翻译" aria-label="整页翻译">译</button>
+    <button id="btn-imt" title="整页工具：翻译 · 朗读 · 解释 · 分析 · 存正文" aria-label="整页工具" aria-expanded="false" aria-controls="imt-row"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/><path d="M20 3v4"/><path d="M22 5h-4"/><path d="M4 17v2"/><path d="M5 18H3"/></svg><svg class="imt-caret" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button>
     <input id="url" type="text" spellcheck="false" placeholder="输入网址,回车打开" autocomplete="off" />
   </div>
 
@@ -506,8 +519,9 @@
     <span class="ir-grow"></span>
     <div class="ir-group" id="ir-actions">
       <button type="button" data-imt-act="read">朗读</button>
-      <button type="button" data-imt-act="explain" class="ir-hide-sm">解释</button>
-      <button type="button" data-imt-act="save" class="ir-hide-sm">收藏</button>
+      <button type="button" data-imt-act="explain">解释</button>
+      <button type="button" data-imt-act="analyze" title="判断这篇内容是否可信、对你意味着什么">分析</button>
+      <button type="button" data-imt-act="save" class="ir-hide-sm" title="把整页正文（含译文）存进划词收藏，可在对话里找回；和地址栏 ★ 的站点收藏不是一回事">存正文</button>
     </div>
     <div class="ir-group" id="ir-read" hidden>
       <button type="button" data-imt-read="prev" class="ir-icon" title="上一段">‹</button>
@@ -647,9 +661,11 @@
         var busy = st.mode === 'translating';
         imtBtn.classList.toggle('busy', busy);
         imtBtn.classList.toggle('on', !imtRow.hidden);
-        imtBtn.setAttribute('aria-pressed', imtRow.hidden ? 'false' : 'true');
-        imtBtn.textContent = imtRow.hidden ? '译 ▾' : '译 ▴';
-        imtBtn.title = st.error ? '整页翻译：' + st.error : (imtRow.hidden ? '打开整页工具栏' : '收起整页工具栏');
+        imtBtn.classList.toggle('open', !imtRow.hidden);
+        imtBtn.setAttribute('aria-expanded', imtRow.hidden ? 'false' : 'true');
+        imtBtn.title = st.error
+          ? '整页工具：' + st.error
+          : (imtRow.hidden ? '整页工具：翻译 · 朗读 · 解释 · 分析 · 存正文' : '收起整页工具栏');
 
         var read = st.read;
         var translated = busy || st.mode === 'dual' || st.mode === 'replace' || st.mode === 'source';
@@ -668,6 +684,10 @@
         irRetry.textContent = '重试 ' + failed;
         irRetry.title = '有 ' + failed + ' 段翻译失败，点此重试';
 
+        // 解释/分析 are one model call each and can take a while; the meta
+        // slot is the only place a click can show it is working.
+        irActions.querySelectorAll('button').forEach(function (b) { b.disabled = !!imtPending; });
+
         var meta = '';
         if (read) {
           meta = '朗读中 ' + ((read.index || 0) + 1) + '/' + (read.total || 0) + (read.layer ? ' · ' + read.layer : '');
@@ -676,11 +696,12 @@
         } else if (busy) {
           meta = (st.done || 0) + '/' + (st.total || 0);
         }
-        irMeta.textContent = imtError || meta;
+        irMeta.textContent = imtError || imtPending || meta;
         irMeta.style.color = imtError ? 'hsl(0 65% 65%)' : '';
       }
 
       var imtError = '';
+      var imtPending = '';
       function renderImt(st) {
         if (!st) return;
         imtState = st;
@@ -690,17 +711,19 @@
 
       function imtAct(method, params) {
         imtError = '';
+        if (method === 'imt.explain') imtPending = '解释中…';
+        else if (method === 'imt.analyze') imtPending = '分析中…';
+        paintImt();
         return window.piSDK.request(method, params).then(function (st) {
           if (st && typeof st === 'object' && st.mode) renderImt(st);
           return st;
         }).catch(function (e) {
           imtError = (e && e.message) ? e.message : '操作失败';
-          if (imtRow.hidden) {
-            imtRow.hidden = false;
-            paintImt();
-          } else {
-            paintImt();
-          }
+          if (imtRow.hidden) imtRow.hidden = false;
+        }).then(function (st) {
+          imtPending = '';
+          paintImt();
+          return st;
         });
       }
 

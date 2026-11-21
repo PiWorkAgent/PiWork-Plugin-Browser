@@ -27,7 +27,9 @@
 export const IMT_SOURCE = String.raw`
 (function () {
   'use strict';
-  var VERSION = 1;
+  // Bump whenever extractArticle/overlay behavior changes: pages that already
+  // have an older runtime return 'already' and keep it until a reload.
+  var VERSION = 2;
   var existing = window.__piImt;
   if (existing && existing.__v === VERSION) return 'already';
   if (!document.body) return 'no-body';
@@ -564,33 +566,53 @@ export const IMT_SOURCE = String.raw`
       ':host{all:initial}',
       '.panel{position:fixed;top:0;right:0;bottom:0;width:min(380px,100vw);z-index:2147483647;',
       'background:#fff;color:#222;font:14px/1.7 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;',
-      'box-shadow:-24px 0 48px rgba(0,0,0,.18);display:flex;flex-direction:column;padding:18px 20px;box-sizing:border-box;overflow-y:auto}',
+      'box-shadow:-24px 0 48px rgba(0,0,0,.18);display:flex;flex-direction:column;box-sizing:border-box;overflow:hidden}',
       '.panel[hidden]{display:none}',
-      '.head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:6px}',
+      '.head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:18px 20px 6px}',
       '.t{font-weight:600;font-size:15px}',
       '.x{border:0;background:none;font-size:18px;line-height:1;color:#888;cursor:pointer}',
       '.h{margin:18px 0 6px;font-size:11px;letter-spacing:.08em;color:#888;text-transform:uppercase}',
       '.sum{margin:8px 0 0}',
       'ul{margin:0;padding-left:18px} li{margin:6px 0}',
       '.term{display:inline-block;margin:4px 6px 0 0;padding:2px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;color:#666}',
-      '.foot{display:flex;gap:8px;margin-top:auto;padding-top:18px}',
-      '.b{border:1px solid #ddd;background:#fff;border-radius:8px;padding:7px 12px;font:inherit;font-size:13px;cursor:pointer}',
-      '.b.primary{background:#b5621f;border-color:#b5621f;color:#fff}',
+      '.scroll{flex:1;min-height:0;overflow-y:auto;padding:0 20px 16px}',
+      '.qa{display:flex;flex-direction:column;gap:10px;margin-top:16px}',
+      '.qa .q{align-self:flex-end;max-width:92%;padding:7px 10px;border-radius:10px 10px 2px 10px;',
+      'background:#f1f1f4;font-size:13px;white-space:pre-wrap;word-break:break-word}',
+      '.qa .a{font-size:13.5px;line-height:1.65;word-break:break-word}',
+      '.qa .a p{margin:6px 0}',
+      '.qa .a ul{margin:6px 0;padding-left:18px}',
+      '.qa .a li{margin:3px 0}',
+      '.qa .a code{padding:1px 4px;border-radius:4px;background:#f1f1f4;font-size:12px}',
+      '.qa .a.pending{color:#999}',
+      '.ask{flex:none;display:flex;align-items:flex-end;gap:8px;padding:12px 20px 18px;',
+      'background:#fff;border-top:1px solid #eee}',
+      '.ask textarea{flex:1;min-height:34px;max-height:120px;resize:none;box-sizing:border-box;',
+      'padding:7px 10px;border:1px solid #ddd;border-radius:8px;background:#fff;color:inherit;',
+      'font:inherit;font-size:13px;line-height:1.5;outline:none}',
+      '.ask textarea:focus{border-color:#b5621f}',
+      '.ask button{flex:none;height:34px;padding:0 12px;border:0;border-radius:8px;background:#b5621f;',
+      'color:#fff;font:inherit;font-size:13px;cursor:pointer}',
+      '.ask button:disabled{opacity:.45;cursor:default}',
       '.toast{position:fixed;left:50%;bottom:78px;transform:translateX(-50%);z-index:2147483647;',
       'background:#1f1f22;color:#eee;padding:8px 14px;border-radius:999px;font:12.5px/1.4 -apple-system,sans-serif}',
       '.toast[hidden]{display:none}',
       '@media (prefers-color-scheme: dark){',
       '.panel{background:#1b1b1e;color:#eee;box-shadow:-24px 0 48px rgba(0,0,0,.5)}',
       '.x{color:#999}.term{border-color:#3a3a40;color:#aaa}',
-      '.b{background:#242429;border-color:#3a3a40;color:#eee}',
-      '.b.primary{background:#b5621f;border-color:#b5621f;color:#fff}',
+      '.qa .q{background:#2a2a2f}',
+      '.qa .a code{background:#2a2a2f}',
+      '.ask{background:#1b1b1e;border-top-color:#2a2a2f}',
+      '.ask textarea{background:#242429;border-color:#3a3a40}',
       '}'
     ].join('');
     return '<style>' + css + '</style>' +
       '<div class="panel" hidden>' +
         '<div class="head"><div class="t"></div><button class="x" data-a="explain-close" aria-label="关闭">×</button></div>' +
-        '<div class="body"></div>' +
-        '<div class="foot"><button class="b primary" data-a="explain-read">朗读要点</button><button class="b" data-a="explain-save">收藏</button></div>' +
+        '<div class="scroll"><div class="body"></div><div class="qa"></div></div>' +
+        '<div class="ask"><textarea class="ask-input" rows="1" aria-label="继续提问" ' +
+          'placeholder="基于这篇内容，继续问点什么…"></textarea>' +
+          '<button type="button" class="ask-send" data-a="insight-send" disabled>发送</button></div>' +
       '</div>' +
       '<div class="toast" hidden></div>';
   }
@@ -607,39 +629,237 @@ export const IMT_SOURCE = String.raw`
       root: root,
       panel: root.querySelector('.panel'),
       title: root.querySelector('.t'),
+      scroll: root.querySelector('.scroll'),
       body: root.querySelector('.body'),
+      qa: root.querySelector('.qa'),
+      askInput: root.querySelector('.ask-input'),
+      askSend: root.querySelector('.ask-send'),
       toast: root.querySelector('.toast')
     };
+    var o = overlay;
+    // The composer is a launcher for the agent, not a local chat: the backend
+    // hands the question to the conversation and asks the agent to answer via
+    // browser_show, which routes the reply back into this drawer (showReply).
+    o.askSend.addEventListener('click', function () {
+      var q = String(o.askInput.value || '').trim();
+      if (!q || asking) return;
+      o.askInput.value = '';
+      o.askInput.style.height = '';
+      addQuestion(q);
+      showPending();
+      setAsking(true);
+      pendingAction = { action: 'insight-ask', text: q, at: Date.now() };
+    });
+    o.askInput.addEventListener('input', function () {
+      o.askInput.style.height = 'auto';
+      o.askInput.style.height = Math.min(120, o.askInput.scrollHeight) + 'px';
+      o.askSend.disabled = asking || !String(o.askInput.value || '').trim();
+    });
+    o.askInput.addEventListener('keydown', function (e) {
+      // Enter sends, Shift+Enter is a newline; never send mid-IME.
+      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+        e.preventDefault();
+        o.askSend.click();
+      }
+    });
     root.addEventListener('click', function (e) {
       var b = e.target && e.target.closest ? e.target.closest('[data-a]') : null;
       if (!b) return;
+      if (b.getAttribute('data-a') === 'insight-send') return; // handled above
       pendingAction = { action: b.getAttribute('data-a'), at: Date.now() };
     });
     return overlay;
   }
 
+  function addSection(o, heading, items) {
+    var h = document.createElement('div');
+    h.className = 'h';
+    h.textContent = heading;
+    o.body.appendChild(h);
+    var ul = document.createElement('ul');
+    for (var i = 0; i < items.length; i++) {
+      var li = document.createElement('li');
+      li.textContent = String(items[i]);
+      ul.appendChild(li);
+    }
+    o.body.appendChild(ul);
+  }
+
+  function addParagraph(o, className, text) {
+    var p = document.createElement('p');
+    p.className = className;
+    p.textContent = String(text);
+    o.body.appendChild(p);
+  }
+
+  // ── Follow-up composer (agent-backed) ──
+  //
+  // The drawer is a reading surface, not a chat log: one question at a time,
+  // answered by the conversation's agent and routed back here. The local
+  // "asking" flag is only for the UI; the backend owns the actual await.
+  var asking = false;
+  var replyTimer = null;
+
+  function scrollToEnd(o) {
+    if (o && o.scroll) o.scroll.scrollTop = o.scroll.scrollHeight;
+  }
+
+  function addQuestion(text) {
+    var o = ensureOverlay();
+    var d = document.createElement('div');
+    d.className = 'q';
+    d.textContent = String(text || '');
+    o.qa.appendChild(d);
+    scrollToEnd(o);
+  }
+
+  function showPending() {
+    var o = ensureOverlay();
+    var d = document.createElement('div');
+    d.className = 'a pending';
+    d.setAttribute('data-reply', '1');
+    d.textContent = '正在回答…';
+    o.qa.appendChild(d);
+    scrollToEnd(o);
+  }
+
+  // Minimal, injection-safe Markdown: paragraphs, bullet/number lists, bold
+  // and inline code. Everything goes through text nodes; no innerHTML.
+  function addInline(parent, text) {
+    // \x60 is a backtick: this whole file is a String.raw template, so a
+    // literal backtick here would end it.
+    var parts = String(text || '').split(/(\*\*[^*]+\*\*|\x60[^\x60]+\x60)/);
+    for (var i = 0; i < parts.length; i++) {
+      var part = parts[i];
+      if (!part) continue;
+      if (part.length > 4 && part.slice(0, 2) === '**' && part.slice(-2) === '**') {
+        var b = document.createElement('strong');
+        b.textContent = part.slice(2, -2);
+        parent.appendChild(b);
+      } else if (part.length > 2 && part.charAt(0) === '\x60' && part.slice(-1) === '\x60') {
+        var c = document.createElement('code');
+        c.textContent = part.slice(1, -1);
+        parent.appendChild(c);
+      } else {
+        parent.appendChild(document.createTextNode(part));
+      }
+    }
+  }
+
+  function renderRich(container, text) {
+    container.textContent = '';
+    var lines = String(text || '').split(/\r?\n/);
+    var list = null;
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i].trim().replace(/^>\s?/, '');
+      if (!line) {
+        list = null;
+        continue;
+      }
+      var heading = /^#{1,6}\s+(.*)$/.exec(line);
+      if (heading) {
+        list = null;
+        var hp = document.createElement('p');
+        var hs = document.createElement('strong');
+        hs.textContent = heading[1];
+        hp.appendChild(hs);
+        container.appendChild(hp);
+        continue;
+      }
+      var item = /^(?:[-*•]|\d+[.)])\s+(.*)$/.exec(line);
+      if (item) {
+        if (!list) {
+          list = document.createElement('ul');
+          container.appendChild(list);
+        }
+        var li = document.createElement('li');
+        addInline(li, item[1]);
+        list.appendChild(li);
+        continue;
+      }
+      list = null;
+      var p = document.createElement('p');
+      addInline(p, line);
+      container.appendChild(p);
+    }
+  }
+
+  function setAsking(on) {
+    asking = !!on;
+    var o = ensureOverlay();
+    o.askInput.placeholder = asking ? '正在等回答…' : '基于这篇内容，继续问点什么…';
+    o.askSend.disabled = asking || !String(o.askInput.value || '').trim();
+    if (replyTimer) {
+      clearTimeout(replyTimer);
+      replyTimer = null;
+    }
+    if (!asking) return;
+    replyTimer = setTimeout(function () {
+      replyTimer = null;
+      var slot = o.qa.querySelector('[data-reply]');
+      if (slot) {
+        slot.className = 'a';
+        slot.textContent = '还没有回复 — 可能还在等授权，或者先去对话里看看。';
+        slot.removeAttribute('data-reply');
+      }
+      asking = false;
+      o.askSend.disabled = !String(o.askInput.value || '').trim();
+    }, 95000);
+  }
+
+  /** The agent's answer, matched to the outstanding question. */
+  function showReply(p) {
+    var o = ensureOverlay();
+    var slot = o.qa.querySelector('[data-reply]');
+    if (p && p.state === 'pending') {
+      if (!slot) showPending();
+      else slot.textContent = p.text || '正在回答…';
+      return true;
+    }
+    if (p && p.state === 'timeout') {
+      if (!slot) return false;
+      slot.className = 'a';
+      slot.textContent = String(p.text || '还没有回复。');
+      slot.removeAttribute('data-reply');
+      setAsking(false);
+      scrollToEnd(o);
+      return true;
+    }
+    if (!slot) return false;
+    slot.className = 'a';
+    renderRich(slot, (p && p.text) || '');
+    slot.removeAttribute('data-reply');
+    setAsking(false);
+    scrollToEnd(o);
+    return true;
+  }
+
+  // One drawer for both whole-page reads: 解释 sends summary/bullets/terms,
+  // 分析 sends summary/sections/verdict. The shape is the discriminator; no
+  // separate renderer needed.
   function showExplain(p) {
     var o = ensureOverlay();
     o.title.textContent = p && p.title ? p.title : '整页解释';
     o.body.textContent = '';
-    if (p && p.summary) {
-      var sum = document.createElement('p');
-      sum.className = 'sum';
-      sum.textContent = p.summary;
-      o.body.appendChild(sum);
-    }
-    if (p && p.bullets && p.bullets.length) {
-      var h = document.createElement('div');
-      h.className = 'h';
-      h.textContent = '要点';
-      o.body.appendChild(h);
-      var ul = document.createElement('ul');
-      for (var i = 0; i < p.bullets.length; i++) {
-        var li = document.createElement('li');
-        li.textContent = String(p.bullets[i]);
-        ul.appendChild(li);
+    o.qa.textContent = '';
+    o.askInput.value = '';
+    o.askInput.style.height = '';
+    setAsking(false);
+    o.scroll.scrollTop = 0;
+    if (p && p.summary) addParagraph(o, 'sum', p.summary);
+    if (p && p.bullets && p.bullets.length) addSection(o, '要点', p.bullets);
+    if (p && p.sections) {
+      for (var s = 0; s < p.sections.length; s++) {
+        var section = p.sections[s] || {};
+        if (section.items && section.items.length) addSection(o, String(section.h || ''), section.items);
       }
-      o.body.appendChild(ul);
+    }
+    if (p && p.verdict) {
+      var vh = document.createElement('div');
+      vh.className = 'h';
+      vh.textContent = '结论';
+      o.body.appendChild(vh);
+      addParagraph(o, 'sum', p.verdict);
     }
     if (p && p.terms && p.terms.length) {
       var th = document.createElement('div');
@@ -703,21 +923,67 @@ export const IMT_SOURCE = String.raw`
     return best || document.body;
   }
 
+  // pickRoot scores text minus links, which can leave a wrapper that also
+  // holds ads/related links (百度百科's lemmaWrapper). Walk down while one
+  // child carries ≥80% of the text: that is the article column, and it stops
+  // at the level whose children are separate sections/paragraphs.
+  function deepenRoot(root) {
+    var best = root;
+    for (var i = 0; i < 6; i++) {
+      var total = textOf(best).length;
+      if (!total) break;
+      var pick = null;
+      var pickLen = 0;
+      for (var k = 0; k < best.children.length; k++) {
+        var child = best.children[k];
+        if (!child) continue;
+        if (child.tagName !== 'DIV' && child.tagName !== 'SECTION' && child.tagName !== 'ARTICLE') continue;
+        var len = textOf(child).length;
+        if (len > pickLen) {
+          pickLen = len;
+          pick = child;
+        }
+      }
+      if (!pick || pickLen < total * 0.8) break;
+      best = pick;
+    }
+    return best;
+  }
+
   function extractArticle() {
-    var root = pickRoot();
+    var root = deepenRoot(pickRoot());
     var titleEl = document.querySelector('h1');
     var title = (titleEl ? textOf(titleEl) : document.title) || '';
-    var nodes = root.querySelectorAll('h1,h2,h3,p,li,blockquote,figcaption,td');
+    // Lots of sites (百度百科 is the classic case) put paragraphs in
+    // <div class="para"> with <span> inside — no <p> anywhere. Selecting only
+    // semantic tags therefore picked up the table of contents and the
+    // reference list while missing the body entirely. div/section join the
+    // candidates, but only as LEAF blocks: an element that still contains
+    // block-level children is a wrapper and would duplicate its descendants.
+    var nodes = root.querySelectorAll('h1,h2,h3,p,li,blockquote,figcaption,td,div,section');
     var blocks = [];
     var chars = 0;
     for (var i = 0; i < nodes.length; i++) {
       var el = nodes[i];
+      var tag = el.tagName;
+      var isWrapperTag = tag === 'DIV' || tag === 'SECTION';
       var t = textOf(el);
-      if (!t || t.length < 2) continue;
-      if (!/^H[1-3]$/.test(el.tagName) && t.length < 24) continue;
+      if (!t) continue;
+      if (isWrapperTag) {
+        if (t.length < 40) continue;
+        if (el.querySelector('div,section,p,li,h1,h2,h3,blockquote,figcaption,td')) continue;
+        var links = el.querySelectorAll('a');
+        var linkText = 0;
+        for (var j = 0; j < links.length; j++) linkText += textOf(links[j]).length;
+        // Link-heavy leaves are navigation, not prose.
+        if (t.length - linkText * 2 < 40) continue;
+      } else {
+        if (t.length < 2) continue;
+        if (!/^H[1-3]$/.test(tag) && t.length < 24) continue;
+      }
       if (chars + t.length > 30000) break;
       chars += t.length;
-      blocks.push({ tag: el.tagName.toLowerCase(), text: t });
+      blocks.push({ tag: tag.toLowerCase(), text: t });
     }
     return { title: title.trim(), blocks: blocks, chars: chars, truncated: chars >= 30000 };
   }
@@ -854,6 +1120,7 @@ export const IMT_SOURCE = String.raw`
     clearHighlight: clearHighlight,
     extractArticle: extractArticle,
     showExplain: showExplain,
+    showReply: showReply,
     hideExplain: hideExplain,
     showToast: showToast,
     pollOverlay: pollOverlay,
