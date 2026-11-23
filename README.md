@@ -1,38 +1,39 @@
 # PiWork-Plugin-Browser
 
-PiWork 插件：把浏览器放进 PiWork 的右栏，并把操作网页的能力交给 agent。插件 id `com.pi.browser`。
+[English](README.en.md) | 简体中文
 
-> 需要 PiWork 桌面端（Web 端不加载插件）。在 PiWork 的「插件中心」安装；安装、更新、回滚由客户端通过 [PiWork-Registry](https://github.com/PiWorkAgent/PiWork-Registry) 完成。
+**PiWork 官方插件 · 浏览器自动化 · `com.pi.browser`**
 
-![浏览器面板](./assets/screenshot.png)
+把 PiWork 内嵌的浏览器交给 agent：打开网页、读取页面结构、点击、填表、上传文件、滚动、截图，也能按目标自动走完多步。浏览器面板里看到的就是 agent 正在操作的那个页面——它导航，你那边跟着变；你切到别的标签或自己点页面，agent 看到的也是同一个页面。登录态与宿主浏览器共用，不需要在插件里再登录一次。
 
-## 功能
+## PiWork 中的浏览器自动化
 
-- **内嵌浏览器** — 右栏就是浏览器：地址栏、前进 / 后退 / 刷新、多标签页、收藏与历史。
-- **agent 操作网页** — 打开网址、读取页面可交互元素（每个元素带 ref）、点击、填表、下拉选择、上传文件、悬停、滚动、截图；支持同源与跨域 iframe、拖拽上传和原生确认框。
-- **页面内划词** — 选中文字弹出复合框：引用、翻译、解释、朗读、收藏；回车把问题连同引用发送到对话，答案回显在框内。
-- **整页阅读** — 工具栏一行完成整页翻译、导读与内容分析。
-- **收藏与历史** — agent 能理解「打开我常用的那个网站」「上次打开的那个页面」并直接打开。
-- **操作录制** — 在收藏站点上成功跑完一组操作后自动记为 recipe，下次复用并跟踪是否还能跑通。
+![PiWork 中的浏览器自动化](./media/demo.gif)
 
-浏览器引擎与登录态归 PiWork 宿主；插件负责面板、地址栏和页面操作。
+## 能做什么
 
-## 权限
+- **页面操作** —— 导航、点击、填表、下拉选择、悬停、滚动、上传本地文件；支持同源与跨域 iframe、拖拽上传和原生确认框。每一步都可以读回页面快照验证结果。
+- **理解页面** —— 返回可交互元素快照（按钮 / 链接 / 输入框各带一个 ref），按文字模糊查找，必要时执行页面内 JS 或截图。
+- **多标签与分屏** —— 打开、切换、关闭标签；分屏时每个页面各自独立，地址栏和历史跟着当前标签走。
+- **历史与收藏** —— 每次导航自动记录历史（按网址去重，保留最近 500 条）；星标收藏常用站点，地址栏下拉直达；agent 也能查询，用户说「上次那个网站」时不用重打网址。
+- **快捷配方** —— 在收藏站点上成功执行的一批操作会自动记成配方（步骤、目标、备选定位）。之后 agent 可以按配方直接执行，站点小改也能命中备选定位。
+- **划词助手** —— 网页里选中文字后弹出「翻译 / 解释 / 朗读 / 收藏」和问题输入框；agent 的回答直接回显在框里，而不是只出现在对话中。
+- **整页翻译** —— 工具栏「译」展开一行控制条：原文替换、双语对照、整页朗读、正文解释、整页收藏。译文按「站点 + 原文哈希」缓存，重访同一页不重复调用模型。
+- **23 个 agent 工具** —— 覆盖导航、读取、交互、标签页、历史、收藏、配方和展示。
 
-安装时请求 `browser`、`storage`、`voice`、`ai` 权限：
+## 在 PiWork 里安装
 
-- `browser` — 驱动宿主内嵌的浏览器引擎
-- `storage` — 保存收藏、历史与 recipe
-- `voice` — 划词朗读
-- `ai` — 划词翻译 / 解释时调用模型
+1. 打开 PiWork 桌面端。
+2. 右侧栏 →「插件中心」→「浏览器自动化」→ 安装。
+3. 首次安装会显示权限清单；确认后下载并校验（sha256），装好即出现在「打开插件」菜单里。
 
-## 安装
+Web 端不加载插件；浏览器能力需要桌面端。
 
-在 PiWork 里打开插件中心，搜索「浏览器」并安装。安装、更新、回滚都走真实市场流程（sha256 校验、权限确认、原子替换）。
-
-## 开发
+从源码开发：
 
 ```bash
+git clone https://github.com/PiWorkAgent/PiWork-Plugin-Browser
+cd PiWork-Plugin-Browser
 npm install
 npm run build        # 后端 → dist/main.mjs（SDK 会被打包进去）
 ```
@@ -45,6 +46,39 @@ PI_DEV_PLUGINS=/path/to/PiWork-Plugin-Browser pnpm dev:desktop:plugins
 
 面板是 `ui/` 下的静态页面（不是构建产物），后端入口由 `manifest.json` 的 `backend` 声明。
 
+## 对话里的用法
+
+| 你说 | 会发生什么 |
+| --- | --- |
+| 「打开 Hacker News，看看今天前十条」 | agent 导航、读取快照、整理结果 |
+| 「在 GitHub 搜 X，把第一个仓库的安装步骤念给我听」 | 导航、搜索、点击、读取，再用宿主语音朗读 |
+| 「帮我把这份表单填了，文件用 ~/Downloads/a.pdf」 | `browser_fill` 填表 + `browser_upload` 上传本地文件 |
+| 「回到我上次看的那个页面」 | `browser_history_search` 找到并打开 |
+| 「把这段英文翻译一下」 | 划词弹框 → agent 用 `browser_show` 把译文回显在框里 |
+| 「保存这个页面，下次按这个流程再走一遍」 | 收藏站点后，成功的 `browser_act` 被记成配方 |
+
+## 工具一览
+
+| 分组 | 工具 |
+| --- | --- |
+| 导航 | `browser_navigate` |
+| 标签页 | `browser_tab_list` · `browser_tab_open` · `browser_tab_switch` · `browser_tab_close` |
+| 读取 | `browser_get_state` · `browser_find` · `browser_screenshot` · `browser_evaluate` · `browser_walk` |
+| 交互 | `browser_click` · `browser_fill` · `browser_act` · `browser_hover` · `browser_select` · `browser_scroll` · `browser_upload` |
+| 历史 / 收藏 / 配方 | `browser_history_search` · `browser_favorites_list` · `browser_recipes` · `browser_recipe_delete` |
+| 展示 / 片段 | `browser_show` · `browser_clips_list` |
+
+标准循环是 `browser_navigate → browser_get_state → browser_click / browser_fill → browser_get_state`。完整语义、选择器格式和边界条件见 [PLUGIN.md](./PLUGIN.md)（这份文件会随插件一起交给 agent）。
+
+## 权限
+
+| 权限 | 用途 |
+| --- | --- |
+| `browser` | 使用宿主内嵌浏览器引擎、标签页、页面会话与登录态 |
+| `storage` | 插件私有存储：历史、收藏、配方、划词片段 |
+| `voice` | 划词与整页朗读（宿主 TTS） |
+| `ai` | 整页翻译与解释（走用户设置的默认对话模型，会消耗 token） |
+
 ## 发布
 
 1. 改 `manifest.json` 的 `version`
@@ -55,7 +89,7 @@ Release 固定包含两个资产：
 - `com.pi.browser-<version>.zip` — 运行时负载（manifest、`dist/`、`ui/`、`assets/`、`PLUGIN.md`）
 - `index.json` — 单条目市场索引，`url` 指向本 Release（绝对地址），带 `sha256`
 
-registry 会定时把各插件的 `index.json` 合并成客户端读的市场索引。
+[PiWork-Registry](https://github.com/PiWorkAgent/PiWork-Registry) 会定时把各插件的 `index.json` 合并成客户端读取的市场索引。
 
 ## 目录
 
@@ -65,12 +99,14 @@ registry 会定时把各插件的 `index.json` 合并成客户端读的市场索
 | `src/backend/` | 后端源码（打包成 `dist/main.mjs`） |
 | `dist/` | 后端打包产物（已提交，便于本地直接跑） |
 | `ui/` | 面板页面 |
-| `assets/` | 图标与 README 截图 |
-| `PLUGIN.md` | 给 agent 的使用说明（随插件一起发布） |
+| `assets/` | 运行时图标 |
+| `media/` | README 演示素材（不进入发布包） |
 | `scripts/release.mjs` | 打包 + 生成单条目索引 |
 
-## 相关
+## 相关链接
 
-- 插件开发指南：[PiWork-Plugin-Docs](https://github.com/PiWorkAgent/PiWork-Plugin-Docs/blob/main/docs/plugin-dev-guide.md)
-- 后端 SDK：[`@weiqun789/plugin-sdk`](https://www.npmjs.com/package/@weiqun789/plugin-sdk)
-- agent 使用说明：[PLUGIN.md](./PLUGIN.md)
+- [PiWork](https://github.com/PiWorkAgent/PiWork) — 宿主应用
+- [PiWork-Registry](https://github.com/PiWorkAgent/PiWork-Registry) — 插件市场索引
+- [插件开发指南](https://github.com/PiWorkAgent/PiWork-Plugin-Docs/blob/main/docs/plugin-dev-guide.md)
+- [插件 SDK `@weiqun789/plugin-sdk`](https://www.npmjs.com/package/@weiqun789/plugin-sdk)
+- [PLUGIN.md](./PLUGIN.md) — 写给 agent 的使用说明
