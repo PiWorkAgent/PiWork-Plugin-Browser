@@ -8,7 +8,11 @@
 
 ## PiWork 中的浏览器自动化
 
-![PiWork 中的浏览器自动化](./media/demo.gif)
+![PiWork 里的浏览器面板](./assets/screenshot.png)
+
+下面的演示里，一句话让 agent 打开网页、点击并汇报结果。
+
+![浏览器自动化演示](./media/demo.gif)
 
 ## 能做什么
 

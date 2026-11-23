@@ -8,7 +8,11 @@ Hands the browser embedded in PiWork to the agent: open pages, inspect the page 
 
 ## Browser automation in PiWork
 
-![Browser automation in PiWork](./media/demo.gif)
+![The browser panel in PiWork](./assets/screenshot.png)
+
+In the demo below, one sentence tells the agent to open a page, click, and report the result.
+
+![Browser automation demo](./media/demo.gif)
 
 ## What it does
 
