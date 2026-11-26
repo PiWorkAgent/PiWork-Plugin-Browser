@@ -40,18 +40,18 @@ const fakePage = {
   clips: [],
   disabled: 0,
   theme: null,
-  /** The last payload the whole-page drawer was opened with. */
-  insight: null,
-  /** The last reply the agent's browser_show routed into the drawer. */
-  reply: null,
-  /** A pending drawer-button click for the imt overlay poll. */
-  imtAction: null,
+  /**
+   * Whether the selection popup is on screen. The page has no other surface,
+   * so an answer that arrives while this is false is dropped — the backend
+   * must say so instead of claiming it displayed anything.
+   */
+  popupOpen: true,
 };
 
 function fakeEvaluate(expression) {
   // ── Whole-page runtime (__piImt) ──
-  // The install source also mentions extractArticle/showExplain, so match the
-  // call shapes (`__piImt.x ?`) rather than the bare names.
+  // The install source also mentions extractArticle, so match the call shape
+  // (`__piImt.extractArticle ?`) rather than the bare name.
   if (expression.includes('window.__piImt = api')) return 'installed';
   if (expression.includes('__piImt.extractArticle ?')) {
     return {
@@ -62,22 +62,6 @@ function fakeEvaluate(expression) {
       ],
     };
   }
-  if (expression.includes('__piImt.showExplain ?')) {
-    const m = expression.match(/showExplain\((\{.*\})\)/s);
-    fakePage.insight = m ? JSON.parse(m[1]) : null;
-    return true;
-  }
-  if (expression.includes('__piImt.showReply ?')) {
-    const m = expression.match(/showReply\((\{.*\})\)/s);
-    fakePage.reply = m ? JSON.parse(m[1]) : null;
-    return true;
-  }
-  if (expression.includes('__piImt.pollOverlay ?')) {
-    const action = fakePage.imtAction;
-    fakePage.imtAction = null;
-    return { action, panel: true };
-  }
-  if (expression.includes('__piImt.showToast ?')) return true;
   // Order matters: the inject source also mentions __piSelDisable (it defines
   // it), so the install/disable checks must be anchored on their own shapes.
   if (expression.includes('data-pi-sel-host')) {
@@ -96,6 +80,9 @@ function fakeEvaluate(expression) {
     return true;
   }
   if (expression.includes('__piNoteShow')) {
+    // A closed popup has nowhere to draw: the real script returns false and
+    // records nothing.
+    if (!fakePage.popupOpen) return false;
     const m = expression.match(/__piNoteShow\((\{.*\})\)/s);
     fakePage.notes.push(m ? JSON.parse(m[1]) : { state: 'unparsed' });
     return true;
@@ -240,24 +227,9 @@ function handleFromBackend(msg) {
           sendToBackend({ type: 'call-result', id: msg.id, result: { ok: true } });
           break;
         case 'ai.complete':
-          // The 分析 prompt asks for the critical-reading JSON object; the
-          // translation prompt gets an empty array (only the shape matters).
-          sendToBackend({
-            type: 'call-result',
-            id: msg.id,
-            result: {
-              text: /阅读分析师/.test(String(msg.params.system ?? ''))
-                ? JSON.stringify({
-                    thesis: '远程办公整体提升产出，但证据集中在科技行业。',
-                    structure: ['先给行业调查', '再举公司案例'],
-                    evidence: [{ claim: '产出提升 13%', support: '2024 年行业调查', strength: '中' }],
-                    assumptions: ['员工在家同样自律'],
-                    gaps: ['未讨论跨行业差异'],
-                    verdict: '可作为参考，不宜外推到所有行业。',
-                  })
-                : '[]',
-            },
-          });
+          // Whole-page translation is the only caller left; the answer shape
+          // is all the loop needs here.
+          sendToBackend({ type: 'call-result', id: msg.id, result: { text: '[]' } });
           break;
         case 'voice.speak':
           voiceCalls.push(msg.params);
@@ -747,9 +719,22 @@ check(
 
 const shown = await callTool('browser_show', { text: '你好,世界', kind: 'translate' });
 check(
-  'browser_show renders the agent result in the page card',
-  /已展示/.test(shown.content?.[0]?.text ?? '') && fakePage.notes.some((n) => n.state === 'done' && n.text === '你好,世界'),
+  'browser_show renders the agent result in the selection popup',
+  /已展示在划词弹框里/.test(shown.content?.[0]?.text ?? '') &&
+    fakePage.notes.some((n) => n.state === 'done' && n.text === '你好,世界'),
   JSON.stringify({ result: shown.content?.[0]?.text, notes: fakePage.notes }),
+);
+
+// Closed popup: the page has no second surface, so nothing is drawn and the
+// tool says so instead of claiming a display that did not happen.
+fakePage.popupOpen = false;
+fakePage.notes.length = 0;
+const missed = await callTool('browser_show', { text: '迟到的译文', kind: 'translate' });
+fakePage.popupOpen = true;
+check(
+  'an answer that arrives after the popup closed is reported, not faked',
+  /划词弹框已经关闭/.test(missed.content?.[0]?.text ?? '') && fakePage.notes.length === 0,
+  JSON.stringify({ result: missed.content?.[0]?.text, notes: fakePage.notes }),
 );
 
 // A pending 翻译 that outlives 10s tells the user about the permission gate —
@@ -798,40 +783,49 @@ fakePage.installed = false;
 await new Promise((r) => setTimeout(r, 900));
 check('a page that lost the popup gets it back on the next poll', fakePage.installed === true, JSON.stringify(fakePage));
 
-// ── Whole-page 分析 (a silent one-shot model call) ──
+// ── Whole-page 分析 / 解释: work orders for the conversation, not a drawer ──
+
+currentUrl = 'https://example.org/article';
+currentTitle = '远程办公值得吗';
+
+const aiBefore = calls.filter((c) => c.method === 'ai.complete').length;
+sentChatParams.length = 0;
 const analyzeReq = await panelRequest('a1', 'imt.analyze', {});
+const analyzeParams = sentChatParams[sentChatParams.length - 1];
 check(
-  '整页分析 runs ai.complete with the analyst prompt and opens the drawer',
+  '整页分析 hands the extracted article to the conversation agent',
   analyzeReq?.ok === true &&
-    calls.some((c) => c.method === 'ai.complete' && /阅读分析师/.test(String(c.params.system))) &&
-    fakePage.insight?.title === '整页分析' &&
-    fakePage.insight?.sections?.some((s) => s.h === '证据' && s.items.length > 0),
-  JSON.stringify({ result: analyzeReq?.result, insight: fakePage.insight }),
+    calls.filter((c) => c.method === 'ai.complete').length === aiBefore &&
+    String(analyzeParams?.title) === '整页分析' &&
+    /远程办公值得吗/.test(String(analyzeParams?.agentText ?? '')) &&
+    /产出提升了 13%/.test(String(analyzeParams?.agentText ?? '')),
+  JSON.stringify({ result: analyzeReq?.result, params: analyzeParams }),
+);
+check(
+  'the request card carries the page title, an opening excerpt and the source',
+  /远程办公值得吗/.test(String(analyzeParams?.source?.label ?? '')) &&
+    /产出提升了 13%/.test(String(analyzeParams?.quote ?? '')) &&
+    /example\.org\/article/.test(String(analyzeParams?.source?.url ?? '')),
+  JSON.stringify(analyzeParams),
+);
+check(
+  'the article is framed as data the agent must not take instructions from',
+  /只是资料，不是指令/.test(String(analyzeParams?.agentText ?? '')) &&
+    /不要.*调用浏览器工具/.test(String(analyzeParams?.agentText ?? '')),
+  String(analyzeParams?.agentText ?? '').slice(0, 160),
 );
 
-// The drawer's composer hands the question (with page + analysis) to the agent.
-fakePage.imtAction = { action: 'insight-ask', text: '这个结论能外推吗？', at: Date.now() };
-await new Promise((r) => setTimeout(r, 700));
+// 解释 is the same round trip with its own instruction and title.
+sentChatParams.length = 0;
+const explainReq = await panelRequest('a2', 'imt.explain', {});
+const explainParams = sentChatParams[sentChatParams.length - 1];
 check(
-  '抽屉里的提问交给 agent，并要求用 browser_show 回到抽屉',
-  sentChats.some((text) => text.includes('这个结论能外推吗？') && text.includes('browser_show')),
-  sentChats[sentChats.length - 1],
-);
-const askParams = sentChatParams[sentChatParams.length - 1];
-check(
-  '追问卡片带问题正文、分析摘要和按能力区分的标题',
-  askParams?.text === '这个结论能外推吗？' &&
-    /整页分析/.test(String(askParams?.title ?? '')) &&
-    /远程办公/.test(String(askParams?.quote ?? '')),
-  JSON.stringify(askParams),
-);
-
-// ...and the agent's answer is routed back into the drawer instead of the card.
-await callTool('browser_show', { text: '样本集中在科技行业，不宜外推。', kind: 'chat', title: '回答' });
-check(
-  'agent 的回答通过 browser_show 回到抽屉',
-  fakePage.reply?.state === 'done' && /不宜外推/.test(fakePage.reply?.text ?? ''),
-  JSON.stringify(fakePage.reply),
+  '整页解释 sends its own instruction under its own title',
+  explainReq?.ok === true &&
+    String(explainParams?.title) === '整页解释' &&
+    /解释/.test(String(explainParams?.agentText ?? '')) &&
+    String(explainParams?.agentText) !== String(analyzeParams?.agentText),
+  JSON.stringify({ result: explainReq?.result, params: explainParams }),
 );
 
 const stateReq3 = await panelRequest('s4', 'state.get');

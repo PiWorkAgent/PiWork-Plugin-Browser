@@ -3,15 +3,15 @@
  *
  * Everything the user sees and clicks is in here, because the page is the only
  * place it can be: the engine view covers this plugin's DOM, and a cross-origin
- * page cannot be reached from the panel either. The script therefore owns its
- * own composite popup, fallback card and toast, and talks to the backend
- * through globals:
+ * page cannot be reached from the panel either. The script therefore owns the
+ * popup and its one-line toast, and talks to the backend through globals:
  *
  *   __piSelAction    written on a button click or Enter; polled AND cleared by
  *                    the backend — the only page→plugin channel there is
  *   __piNoteShow     the backend calls this with a pending / final / timed-out
- *                    result; it renders inline while the popup is open, and
- *                    falls back to the bottom-right card when it is not
+ *                    result; it renders in the popup and returns false when the
+ *                    popup is closed — the page has no second surface, and an
+ *                    answer that missed its popup stays in the conversation
  *   __piRenderClips  the backend calls this with the saved clips (and the id
  *                    of the one just kept) to draw the list under the input
  *   __piToast        one-line confirmation for the rare failure path
@@ -205,22 +205,6 @@ export function selSource(seed: SelThemeSeed | null): string {
       '@media (hover:hover){.clip-x:hover{background:hsl(var(--t-muted-fg)/.18);color:hsl(var(--t-card-fg))}}',
       '.clip-empty{padding:4px 0;font:12px/1.4 var(--t-font,sans-serif);color:hsl(var(--t-muted-fg))}',
 
-      '.card{position:fixed;right:14px;bottom:14px;z-index:2147483647;box-sizing:border-box;',
-      'display:flex;flex-direction:column;gap:4px;max-width:360px;max-height:44vh;overflow:auto;',
-      'padding:12px 36px 12px 14px;border:1px solid hsl(var(--t-border));',
-      'border-radius:calc(var(--t-radius,10px) + 2px);background:hsl(var(--t-card));color:hsl(var(--t-card-fg));',
-      'font:13px/1.65 var(--t-font,sans-serif);',
-      'box-shadow:0 16px 40px rgba(0,0,0,.22),0 2px 8px rgba(0,0,0,.12)}',
-      ':host([data-dark="1"]) .card{box-shadow:0 16px 44px rgba(0,0,0,.55),0 2px 8px rgba(0,0,0,.4)}',
-      '.card-head{display:flex;align-items:center;gap:8px}',
-      '.card-title{flex:1;min-width:0;font:600 12px/1.4 var(--t-font,sans-serif);',
-      'color:hsl(var(--t-muted-fg));letter-spacing:.01em}',
-      '.card-body{white-space:pre-wrap;word-break:break-word}',
-      '.card-close{position:absolute;top:8px;right:8px;display:inline-flex;align-items:center;',
-      'justify-content:center;width:24px;height:24px;padding:0;border:0;border-radius:6px;',
-      'background:transparent;color:hsl(var(--t-muted-fg));cursor:pointer}',
-      '.card-close svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round}',
-
       '.toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);z-index:2147483647;',
       'max-width:calc(100vw - 32px);padding:8px 16px;border-radius:999px;',
       'background:hsl(var(--t-primary));color:hsl(var(--t-primary-fg));text-align:center;',
@@ -369,47 +353,12 @@ export function selSource(seed: SelThemeSeed | null): string {
     popup.appendChild(composer);
     popup.appendChild(results);
 
-    // ── the fallback card, for results that arrive after the popup is gone ──
-    var card = el('div', 'card');
-    card.hidden = true;
-    var cardHeadRow = el('div', 'card-head');
-    var cardTitle = el('div', 'card-title');
-    var cardRead = el('button', 'icon-btn');
-    cardRead.type = 'button';
-    cardRead.innerHTML = ICON.speak;
-    cardRead.title = '朗读结果（再次点击停止）';
-    cardRead.setAttribute('aria-label', '朗读结果');
-    cardRead.hidden = true;
-    cardRead.addEventListener('click', function () {
-      var text = String(cardBody.textContent || '');
-      if (!text.trim()) return;
-      report('朗读结果', { text: text.slice(0, 8000) });
-      setReadUI(!readPlaying);
-    });
-    var cardBody = el('div', 'card-body');
-    var cardClose = el('button', 'card-close');
-    cardClose.type = 'button';
-    cardClose.innerHTML = ICON.close;
-    cardClose.title = '关闭';
-    cardClose.setAttribute('aria-label', '关闭');
-    cardClose.addEventListener('click', function () { card.hidden = true; });
-    cardHeadRow.appendChild(cardTitle);
-    cardHeadRow.appendChild(cardRead);
-    card.appendChild(cardHeadRow);
-    card.appendChild(cardBody);
-    card.appendChild(cardClose);
-
     var readPlaying = false;
     function setReadUI(playing) {
       readPlaying = !!playing;
-      var icon = readPlaying ? ICON.stop : ICON.speak;
-      btnReadResult.innerHTML = icon;
-      cardRead.innerHTML = icon;
-      var title = readPlaying ? '停止朗读' : '朗读结果（再次点击停止）';
-      btnReadResult.title = title;
-      cardRead.title = title;
+      btnReadResult.innerHTML = readPlaying ? ICON.stop : ICON.speak;
+      btnReadResult.title = readPlaying ? '停止朗读' : '朗读结果（再次点击停止）';
       btnReadResult.classList.toggle('playing', readPlaying);
-      cardRead.classList.toggle('playing', readPlaying);
     }
     // The backend pushes the host's real playback state here, so the icon
     // resets when a clip finishes on its own.
@@ -421,7 +370,6 @@ export function selSource(seed: SelThemeSeed | null): string {
     var toastTimer = null;
 
     root.appendChild(popup);
-    root.appendChild(card);
     root.appendChild(toast);
     document.documentElement.appendChild(host);
 
@@ -448,7 +396,6 @@ export function selSource(seed: SelThemeSeed | null): string {
     }
     function showPopup(text) {
       pinned = false;
-      card.hidden = true;
       results.hidden = true;
       resultsBody.textContent = '';
       resultsHead.textContent = '';
@@ -608,49 +555,33 @@ export function selSource(seed: SelThemeSeed | null): string {
     btnSend.addEventListener('click', doSend);
 
     // ── the backend's handles into this UI ──
+    //
+    // The popup is the ONLY thing this script draws for a result: the page has
+    // no second surface, so an answer that arrives after the user closed the
+    // popup is not shown at all (false) — it stays in the conversation, which
+    // is where everything durable lives. The drawer and the bottom-right card
+    // this replaced were a parallel, per-page UI that covered the article and
+    // died with the tab.
     window.__piNoteShow = function (payload) {
-      if (!payload) return;
+      if (!payload || popup.hidden) return false;
       var kind = payload.kind || '';
-      var inPopup = !popup.hidden;
-      var pendingText = '';
-      if (payload.state === 'pending-hint') {
-        pendingText = '还没回来 — 多半是第一次调用在等授权：去对话里点「总是允许」，本次会话就不再问了。';
-      }
       if (payload.state === 'pending' || payload.state === 'pending-hint') {
         var head = kind === 'explain' ? '解释中' : kind === 'chat' ? '思考中' : '翻译中';
-        if (inPopup) {
-          showResult(head, pendingText, false, true);
-        } else {
-          cardTitle.textContent = head;
-          cardBody.textContent = pendingText;
-          cardRead.hidden = true;
-          card.hidden = false;
-        }
-        return;
+        var hint =
+          payload.state === 'pending-hint'
+            ? '还没回来 — 多半是第一次调用在等授权：去对话里点「总是允许」，本次会话就不再问了。'
+            : '';
+        showResult(head, hint, false, true);
+        return true;
       }
       if (payload.state === 'timeout') {
-        var tmsg = '等得有点久了 — 去对话里看看进度。';
-        if (inPopup) {
-          showResult('还在等结果', tmsg);
-        } else {
-          cardTitle.textContent = '还在等结果';
-          cardBody.textContent = tmsg;
-          cardRead.hidden = true;
-          card.hidden = false;
-        }
-        return;
+        showResult('还在等结果', '等得有点久了 — 去对话里看看进度。');
+        return true;
       }
       var title = payload.title || (kind === 'explain' ? '解释' : kind === 'translate' ? '译文' : kind === 'chat' ? '回答' : '结果');
-      if (inPopup) {
-        setReadUI(false);
-        showResult(title, payload.text || '', true);
-      } else {
-        cardTitle.textContent = title;
-        cardBody.textContent = payload.text || '';
-        setReadUI(false);
-        cardRead.hidden = !(payload.text || '').trim();
-        card.hidden = false;
-      }
+      setReadUI(false);
+      showResult(title, payload.text || '', true);
+      return true;
     };
     window.__piRenderClips = function (clips, newestId) {
       resultsHead.textContent = '收藏的文字';

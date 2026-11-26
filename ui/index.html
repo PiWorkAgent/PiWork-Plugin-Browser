@@ -684,8 +684,8 @@
         irRetry.textContent = '重试 ' + failed;
         irRetry.title = '有 ' + failed + ' 段翻译失败，点此重试';
 
-        // 解释/分析 are one model call each and can take a while; the meta
-        // slot is the only place a click can show it is working.
+        // 解释/分析 send a request card to the conversation and return at once;
+        // the answer is written there by the agent, not drawn in this panel.
         irActions.querySelectorAll('button').forEach(function (b) { b.disabled = !!imtPending; });
 
         var meta = '';
@@ -711,18 +711,26 @@
 
       function imtAct(method, params) {
         imtError = '';
-        if (method === 'imt.explain') imtPending = '解释中…';
-        else if (method === 'imt.analyze') imtPending = '分析中…';
+        var sending = method === 'imt.explain' || method === 'imt.analyze';
+        if (sending) imtPending = '发送中…';
         paintImt();
         return window.piSDK.request(method, params).then(function (st) {
           if (st && typeof st === 'object' && st.mode) renderImt(st);
+          // The request card is in the conversation timeline now; say so long
+          // enough to be read, then hand the meta slot back.
+          if (sending) {
+            imtPending = '已发到对话';
+            setTimeout(function () {
+              if (imtPending === '已发到对话') { imtPending = ''; paintImt(); }
+            }, 2400);
+          }
           return st;
         }).catch(function (e) {
           imtError = (e && e.message) ? e.message : '操作失败';
           if (imtRow.hidden) imtRow.hidden = false;
         }).then(function (st) {
-          imtPending = '';
-          paintImt();
+          if (!sending) imtPending = '';
+          if (!imtPending) paintImt();
           return st;
         });
       }

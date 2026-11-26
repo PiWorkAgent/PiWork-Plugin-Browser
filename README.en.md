@@ -22,7 +22,7 @@ In the demo below, one sentence tells the agent to open a page, click, and repor
 - **History and favorites** — every navigation is recorded (deduplicated by URL, latest 500 entries); star favorite sites for one-click access from the address bar. The agent can query both, so “that site from last time” does not need to be retyped.
 - **Recipes** — a successful batch of actions on a favorite site is recorded as a recipe (steps, targets, fallback locators). The agent can replay a recipe later, and small site changes still hit the fallback locators.
 - **Selection assistant** — select text on a page to get Translate / Explain / Read aloud / Save plus a question box; the agent's answer is shown directly in the popup instead of only in the conversation.
-- **Full-page translation** — the “译” toolbar expands a control row: replace the original text, bilingual view, read the page aloud, explain the body text, and save the page. Translations are cached by site + source hash, so revisiting the same page does not call the model again.
+- **Full-page translation** — the “译” toolbar expands a control row: replace the original text, bilingual view, read the page aloud, and save the page. Translations are cached by site + source hash, so revisiting the same page does not call the model again. Body **explain / analyze** are not model calls in this row: the extracted text is handed to the conversation's agent and answered there, where it can be followed up and kept.
 - **23 agent tools** — covering navigation, reading, interaction, tabs, history, favorites, recipes, and display.
 
 ## Install in PiWork
@@ -81,7 +81,7 @@ The standard loop is `browser_navigate → browser_get_state → browser_click /
 | `browser` | Use the host's embedded browser engine, tabs, page sessions, and login state |
 | `storage` | Plugin-private storage: history, favorites, recipes, selected-text clips |
 | `voice` | Read selections and whole pages aloud (host TTS) |
-| `ai` | Full-page translation and explanation (uses the user's default chat model and consumes tokens) |
+| `ai` | Full-page translation (uses the user's default chat model and consumes tokens) |
 
 ## Release
 
