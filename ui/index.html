@@ -200,6 +200,49 @@
     .recipe-row { display: flex; align-items: center; gap: 8px; padding: 5px 12px; }
     .recipe-row .row-x { visibility: visible; }
     .recipe-note { padding: 2px 12px 4px; font-size: 11px; color: hsl(var(--muted-foreground, 217 9% 59%)); }
+    /* Site memory: the user's own notes for a site. Not `.row` — they are
+       records to manage, not navigation targets, so they stay out of the
+       keyboard-highlight indexing. */
+    .mem-row { display: flex; align-items: center; gap: 8px; padding: 5px 12px; }
+    .mem-row .row-x { visibility: visible; }
+    .mem-main { flex: 1; min-width: 0; }
+    .mem-text { font-size: 12.5px; word-break: break-word; }
+    .mem-row.off .mem-text { color: hsl(var(--muted-foreground, 217 9% 59%)); text-decoration: line-through; }
+    .mem-sub { font-size: 11px; color: hsl(var(--muted-foreground, 217 9% 59%)); }
+    .mem-add { display: flex; gap: 6px; padding: 4px 12px 6px; }
+    .mem-input {
+      flex: 1; min-width: 0;
+      background: transparent; color: inherit; font: inherit; padding: 3px 6px;
+      border: 1px solid hsl(var(--border, 218 14% 20%)); border-radius: 4px;
+    }
+    .mem-add button {
+      flex: none; padding: 3px 12px; border-radius: 4px; cursor: pointer;
+      border: 1px solid hsl(var(--border, 218 14% 20%)); background: transparent; color: inherit; font: inherit;
+    }
+    .mem-add button:disabled { opacity: 0.5; cursor: default; }
+    .mem-err { padding: 2px 12px 4px; font-size: 11px; color: hsl(var(--destructive, 0 70% 62%)); }
+    /* Pending / confirmed are groups inside the memory section, not peers of
+       it: indent so the eye reads one section with two piles. */
+    .mem-sub-sec { padding-left: 20px; font-size: 10.5px; }
+    .mem-reason { font-size: 11px; color: hsl(var(--destructive, 0 70% 62%)); word-break: break-word; }
+    .mem-row.suspect .mem-text { color: hsl(var(--destructive, 0 70% 72%)); }
+    .mem-history { padding: 4px 12px 10px; }
+    .mem-hist-title { font-size: 11px; color: hsl(var(--muted-foreground, 217 9% 59%)); margin-bottom: 4px; }
+    .mem-hist-empty { font-size: 11px; color: hsl(var(--muted-foreground, 217 9% 59%)); padding: 2px 0 6px; }
+    .mem-hist-row { display: flex; align-items: center; gap: 6px; padding: 2px 0; font-size: 11px; }
+    .mem-hist-when { flex: none; color: hsl(var(--muted-foreground, 217 9% 59%)); }
+    .mem-hist-by { flex: none; color: hsl(var(--muted-foreground, 217 9% 59%)); }
+    .mem-hist-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .mem-hist-row .row-x { visibility: visible; }
+    /* Recipe revision rows (the dropdown's own history view). */
+    .hist-row { display: flex; align-items: center; gap: 6px; padding: 3px 12px; font-size: 11px; }
+    .hist-when { flex: none; color: hsl(var(--muted-foreground, 217 9% 59%)); }
+    .hist-meta { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .hist-row .row-x { visibility: visible; }
+    /* Failure ledger: a report, not a navigable row. */
+    .run-fail { padding: 4px 12px 6px; font-size: 11px; }
+    .run-fail .rf-where { color: hsl(var(--destructive, 0 70% 62%)); word-break: break-word; }
+    .run-fail .rf-meta { color: hsl(var(--muted-foreground, 217 9% 59%)); word-break: break-word; }
     .recipe-edit { padding: 6px 12px 10px; }
     .re-name-label { display: flex; align-items: center; gap: 8px; font-size: 12px; color: hsl(var(--muted-foreground, 217 9% 59%)); margin-bottom: 6px; }
     .re-name, .re-target, .re-value, .re-expect {
@@ -1014,7 +1057,19 @@
         recipes: [],     // recorded operations for the CURRENT site
         recipeSite: '',  // registrable domain those recipes belong to
         recipeOrigin: '',
+        collections: [], // deterministic reading recipes for the CURRENT site
+        collectView: null, // {id, busy, result, error} while running/showing one
+        memory: [],      // long-term notes the user wrote for the CURRENT site
+        memorySite: '',
+        memoryOrigin: '',
+        memoryFavorited: false, // whether those notes are injected on navigation
+        runs: [],        // recent browser_act runs for the CURRENT site
+        memEditId: '',   // note being edited inline
+        memHistoryId: '', // note whose revisions are open
+        memDraft: '',    // add-field text, kept across re-renders
+        memError: '',    // last write failure, shown under the section
         editing: null,   // recipe being edited in the dropdown
+        recipeHistoryId: '', // recipe whose revisions are open
         running: null,   // recipe being test-run (executes for real)
         active: -1,      // highlighted row across both sections
         tabs: [],        // this conversation's tabs (mirror of the backend)
@@ -1126,6 +1181,8 @@
         // run report the next time the address bar was clicked — favorites and
         // history looked "gone". The recipe's health is already saved.
         state.running = null;
+        state.recipeHistoryId = '';
+        state.collectView = null;
         disarmClear();
       }
 
@@ -1153,6 +1210,35 @@
             state.recipes = (rr && rr.recipes) || [];
             state.recipeSite = (rr && rr.site) || '';
             state.recipeOrigin = (rr && rr.origin) || '';
+            renderList();
+          })
+          .catch(function () {});
+        // Site memory is the user's own writing for this site; like recipes it
+        // is keyed to the page on screen, not to the address query.
+        window.piSDK.request('siteMemory.list', { url: state.url })
+          .then(function (mr) {
+            if (seq !== searchSeq) return;
+            state.memory = (mr && mr.notes) || [];
+            state.memorySite = (mr && mr.site) || '';
+            state.memoryOrigin = (mr && mr.origin) || '';
+            state.memoryFavorited = !!(mr && mr.favorited);
+            renderList();
+          })
+          .catch(function () {});
+        // The run ledger is what makes a failure explainable, so it loads with
+        // the notes rather than behind another click.
+        window.piSDK.request('siteMemory.runs', { url: state.url })
+          .then(function (rr) {
+            if (seq !== searchSeq) return;
+            state.runs = (rr && rr.runs) || [];
+            renderList();
+          })
+          .catch(function () {});
+        // Deterministic reading recipes for the site on screen.
+        window.piSDK.request('collections.list', { url: state.url })
+          .then(function (cr) {
+            if (seq !== searchSeq) return;
+            state.collections = (cr && cr.collections) || [];
             renderList();
           })
           .catch(function () {});
@@ -1253,9 +1339,97 @@
         );
       }
 
+      /**
+       * The collection result view. Data, not navigation: it shows only the
+       * fields the recipe asked for, because that is all the runner returned.
+       */
+      function collectHtml() {
+        var cv = state.collectView;
+        var col = state.collections.filter(function (c) { return c.id === cv.id; })[0] || null;
+        var head = '<div class="sec">🧲 采集' + (col ? ' · ' + esc(col.name) : '') + '</div>';
+        if (cv.busy) {
+          return head +
+            '<div class="recipe-run"><div class="run-head">正在运行：会真实打开页面并只读取字段…</div>' +
+            '<div class="re-actions"><button class="collect-close">关闭</button></div></div>';
+        }
+        var out = '<div class="recipe-run">';
+        if (cv.error) {
+          out += '<div class="run-head bad">' + esc(cv.error) + '</div>';
+        } else {
+          var res = cv.result || {};
+          var items = res.list || [];
+          out += '<div class="run-head">✓ ' + items.length + ' 条 · ' +
+            ((res.ms || 0) / 1000).toFixed(1) + 's（只返回字段，没有页面快照）</div>';
+          out += '<div class="run-out">';
+          for (var i = 0; i < items.length; i++) {
+            var parts = [];
+            for (var k in items[i]) {
+              if (!Object.prototype.hasOwnProperty.call(items[i], k)) continue;
+              var v = String(items[i][k] || '');
+              if (v) parts.push(k + ': ' + (v.length > 120 ? v.slice(0, 120) + '…' : v));
+            }
+            out += '<div class="line">' + (i + 1) + '. ' + esc(parts.join(' · ')) + '</div>';
+          }
+          var details = res.details || [];
+          if (details.length) {
+            out += '<div class="line" style="margin-top:6px">详情：</div>';
+            for (var d = 0; d < details.length; d++) {
+              out += '<div class="line">- ' + esc(details[d].url || '') + '</div>';
+              var fields = details[d].fields || {};
+              for (var fk in fields) {
+                if (!Object.prototype.hasOwnProperty.call(fields, fk)) continue;
+                var fv = String(fields[fk] || '');
+                if (fv) {
+                  out += '<div class="line">&nbsp;&nbsp;' + esc(fk) + ': ' +
+                    esc(fv.length > 200 ? fv.slice(0, 200) + '…' : fv) + '</div>';
+                }
+              }
+            }
+          }
+          out += '</div>';
+        }
+        out += '<div class="re-actions"><button class="collect-close">关闭</button></div></div>';
+        return head + out;
+      }
+
       function renderList() {
         var rows = [];
         var i;
+
+        // A collection run takes over the dropdown: it is a read with a result,
+        // not a navigation list.
+        if (state.collectView) {
+          rows.push(collectHtml());
+          list.innerHTML = rows.join('');
+          return;
+        }
+        // Recipe revision history replaces the list, like the editor does: a
+        // manual selector fix is exactly the change people need to undo.
+        if (state.recipeHistoryId) {
+          var histRec = state.recipes.filter(function (r) { return r.id === state.recipeHistoryId; })[0] || null;
+          rows.push('<div class="sec">配方修订历史' + (histRec ? ' · ' + esc(histRec.name) : '') + '</div>');
+          if (!histRec) {
+            rows.push('<div class="empty">这条配方已经不在了</div>');
+          } else {
+            var histRevs = (histRec.revisions || []).slice().reverse();
+            if (!histRevs.length) {
+              rows.push('<div class="empty">还没有历史记录——手动编辑配方后才会留下</div>');
+            }
+            for (i = 0; i < histRevs.length; i++) {
+              var hrev = histRevs[i];
+              rows.push(
+                '<div class="hist-row">' +
+                  '<span class="hist-when">' + esc(whenLabel(hrev.at)) + '</span>' +
+                  '<span class="hist-meta">' + esc(hrev.name || '（无名称）') + ' · ' + hrev.steps.length + ' 步</span>' +
+                  '<button class="row-x" data-recipe-restore="' + hrev.at + '" title="恢复到这一版">↺</button>' +
+                '</div>'
+              );
+            }
+          }
+          rows.push('<div class="re-actions"><button class="hist-close">关闭</button></div>');
+          list.innerHTML = rows.join('');
+          return;
+        }
 
         // Editing replaces the list: selectors are text, and a text field is
         // the honest editor for them.
@@ -1310,6 +1484,145 @@
             rows.push(rowHtml(state.favorites[i], i, true));
           }
         }
+        // ── Site memory: what the user taught us about this site ──
+        // Shown once the site is favorited (an empty slate to write into) or
+        // when notes already exist (including after unfavoriting, where they
+        // stay but are no longer injected).
+        if (state.memory.length || (state.favorited && state.memoryOrigin)) {
+          rows.push('<div class="sec">🧠 本站记忆' + (state.memorySite ? ' · ' + esc(state.memorySite) : '') + '</div>');
+          var suspectNotes = state.memory.filter(function (n) { return !!n.suspect; });
+          var pendingNotes = state.memory.filter(function (n) { return !n.suspect && n.verified === false; });
+          var confirmedNotes = state.memory.filter(function (n) { return !n.suspect && n.verified !== false; });
+          // Suspect first: the page has already contradicted these, so they are
+          // paused and are the only rows with a correctness problem.
+          if (suspectNotes.length) {
+            rows.push('<div class="sec mem-sub-sec">可疑 · ' + suspectNotes.length + ' · AI 报告与页面不符，已暂停提供</div>');
+            for (i = 0; i < suspectNotes.length; i++) {
+              (function (sn) {
+                rows.push(
+                  '<div class="mem-row suspect">' +
+                    '<div class="mem-main">' +
+                      '<div class="mem-text">' + esc(sn.text) + '</div>' +
+                      '<div class="mem-reason">AI 报告：' + esc(sn.suspect.reason) + '</div>' +
+                    '</div>' +
+                    '<button class="row-x" data-mem-resolve="' + esc(sn.id) + '" title="我核对过页面，这条仍然正确：恢复并提供">✓</button>' +
+                    '<button class="row-x" data-mem-del="' + esc(sn.id) + '" title="删除这条记忆">✕</button>' +
+                  '</div>'
+                );
+              })(suspectNotes[i]);
+            }
+          }
+          // Pending next: an unconfirmed AI observation needs the user's hand.
+          if (pendingNotes.length) {
+            rows.push('<div class="sec mem-sub-sec">待确认 · ' + pendingNotes.length + ' · AI 观察到的事实，确认后才会当作你写的</div>');
+            for (i = 0; i < pendingNotes.length; i++) {
+              (function (pn) {
+                rows.push(
+                  '<div class="mem-row">' +
+                    '<div class="mem-main">' +
+                      '<div class="mem-text">' + esc(pn.text) + '</div>' +
+                      '<div class="mem-sub">AI 观察 · 未确认</div>' +
+                    '</div>' +
+                    '<button class="row-x" data-mem-confirm="' + esc(pn.id) + '" title="确认这条：以后当作用户知识">✓</button>' +
+                    '<button class="row-x" data-mem-del="' + esc(pn.id) + '" title="丢弃这条 AI 记录">✕</button>' +
+                  '</div>'
+                );
+              })(pendingNotes[i]);
+            }
+          }
+          if (confirmedNotes.length) {
+            if (suspectNotes.length || pendingNotes.length) {
+              rows.push('<div class="sec mem-sub-sec">已确认 · ' + confirmedNotes.length + '</div>');
+            }
+            for (i = 0; i < confirmedNotes.length; i++) {
+              var note = confirmedNotes[i];
+              if (state.memHistoryId === note.id) {
+                var revs = (note.revisions || []).slice().reverse();
+                var hist =
+                  '<div class="mem-history" data-mem-hist-id="' + esc(note.id) + '">' +
+                    '<div class="mem-hist-title">修订历史 · ' + esc(note.text.slice(0, 24)) + '</div>';
+                if (!revs.length) hist += '<div class="mem-hist-empty">还没有历史记录</div>';
+                for (var h = 0; h < revs.length; h++) {
+                  var rev = revs[h];
+                  hist +=
+                    '<div class="mem-hist-row">' +
+                      '<span class="mem-hist-when">' + esc(whenLabel(rev.at)) + '</span>' +
+                      '<span class="mem-hist-by">' + (rev.by === 'agent' ? 'AI' : '你') + '</span>' +
+                      '<span class="mem-hist-text">' + esc(rev.text) + '</span>' +
+                      '<button class="row-x" data-mem-restore="' + rev.at + '" title="恢复到这一版">↺</button>' +
+                    '</div>';
+                }
+                hist += '<div class="re-actions"><button class="mem-hist-close">关闭</button></div></div>';
+                rows.push(hist);
+                continue;
+              }
+              if (state.memEditId === note.id) {
+                rows.push(
+                  '<div class="mem-add" data-mem-edit-id="' + esc(note.id) + '">' +
+                    '<input class="mem-input mem-edit-input" value="' + esc(note.text) + '">' +
+                    '<button class="mem-edit-save">保存</button>' +
+                    '<button class="mem-cancel">取消</button>' +
+                  '</div>'
+                );
+                continue;
+              }
+              var off = note.enabled === false;
+              rows.push(
+                '<div class="mem-row' + (off ? ' off' : '') + '">' +
+                  '<div class="mem-main">' +
+                    '<div class="mem-text">' + esc(note.text) + '</div>' +
+                    '<div class="mem-sub">' + (note.by === 'agent' ? 'AI 记的' : '你记的') + (off ? ' · 已停用' : '') + '</div>' +
+                  '</div>' +
+                  '<button class="row-x" data-mem-toggle="' + esc(note.id) + '" title="' +
+                    (off ? '启用：AI 打开本站时会看到' : '停用：暂时不再提供给 AI') + '">' +
+                    (off ? '▶' : '⏸') +
+                  '</button>' +
+                  '<button class="row-x" data-mem-history="' + esc(note.id) + '" title="修订历史（可恢复）">↺</button>' +
+                  '<button class="row-x" data-mem-edit="' + esc(note.id) + '" title="编辑">✎</button>' +
+                  '<button class="row-x" data-mem-del="' + esc(note.id) + '" title="删除">✕</button>' +
+                '</div>'
+              );
+            }
+          }
+          rows.push(
+            '<div class="mem-add">' +
+              '<input class="mem-input" value="' + esc(state.memDraft) + '" ' +
+                'placeholder="这个站是干什么的？例如：公司电商后台，常导出订单">' +
+              '<button class="mem-add-btn"' + (state.memory.length >= 40 ? ' disabled' : '') + '>记住</button>' +
+            '</div>'
+          );
+          rows.push(
+            '<div class="recipe-note">' +
+              (state.memoryFavorited
+                ? 'AI 打开本站时会先看到这些记忆，并知道这是记忆、不是实时页面。'
+                : '本站还没收藏：记忆先存着，收藏后才会提供给 AI。') +
+            '</div>'
+          );
+          if (state.memError) rows.push('<div class="mem-err">' + esc(state.memError) + '</div>');
+        }
+        // ── Failure ledger ──
+        // What broke, and which notes were in front of the agent when it did.
+        // The list is context for the user to judge, not an automatic verdict.
+        var failedRuns = state.runs.filter(function (r) { return !r.ok; }).slice(0, 3);
+        if (failedRuns.length) {
+          rows.push('<div class="sec">⚠ 最近的失败 · ' + (state.memorySite ? esc(state.memorySite) : '本站') + '</div>');
+          for (i = 0; i < failedRuns.length; i++) {
+            (function (run) {
+              var used = (run.injected || []).map(function (id) {
+                var hit = state.memory.filter(function (n) { return n.id === id; })[0];
+                return hit ? hit.text : id;
+              }).slice(0, 2).join('、');
+              rows.push(
+                '<div class="run-fail">' +
+                  '<div class="rf-where">第 ' + run.failedStep + ' 步失败：' + esc(run.error || '（没有记录原因）') + '</div>' +
+                  '<div class="rf-meta">' + esc(whenLabel(run.at)) +
+                    (run.recipeName ? ' · 配方「' + esc(run.recipeName) + '」' : ' · 临时操作') + '</div>' +
+                  '<div class="rf-meta">' + (used ? '当时带着记忆：' + esc(used) : '当时没有注入记忆') + '</div>' +
+                '</div>'
+              );
+            })(failedRuns[i]);
+          }
+        }
         if (state.history.length) {
           rows.push('<div class="sec">最近访问</div>');
           for (i = 0; i < state.history.length; i++) {
@@ -1332,8 +1645,33 @@
                   '<div class="row-url">' + host + rec.steps.length + ' 步 · 用过 ' + rec.uses + ' 次' + broke + stale + '</div>' +
                 '</div>' +
                 '<button class="row-x" data-run="' + esc(rec.id) + '" title="运行这条配方（真的执行每一步）">▶</button>' +
+                '<button class="row-x" data-recipe-history="' + esc(rec.id) + '" title="修订历史（可恢复）">↺</button>' +
                 '<button class="row-x" data-edit="' + esc(rec.id) + '" title="编辑这条配方">✎</button>' +
                 '<button class="row-x" data-recipe="' + esc(rec.id) + '" title="删除这条配方">✕</button>' +
+              '</div>'
+            );
+          }
+        }
+        // Deterministic reading recipes: run returns fields, not a page.
+        if (state.collections.length) {
+          rows.push('<div class="sec">🧲 采集</div>');
+          for (i = 0; i < state.collections.length; i++) {
+            var col = state.collections[i];
+            var stale = col.failures >= 2 ? ' · 已失效' : '';
+            var broke = col.lastError ? ' · 上次失败' : '';
+            var spec = '列表取 ' + col.list.fields.map(function (f) { return f.key; }).join('/');
+            if (col.detail) {
+              spec += ' · 进 ' + col.detail.count + ' 条取 ' + col.detail.fields.map(function (f) { return f.key; }).join('/');
+            }
+            rows.push(
+              '<div class="recipe-row">' +
+                '<div class="row-main">' +
+                  '<div class="row-title">' + esc(col.name) + '</div>' +
+                  '<div class="row-url">' + esc(spec) + stale + broke +
+                    (col.lastOk ? ' · 上次成功 ' + esc(whenLabel(col.lastOk)) : '') + '</div>' +
+                '</div>' +
+                '<button class="row-x" data-collect-run="' + esc(col.id) + '" title="运行采集：真实打开页面，只返回字段（不调用模型）">▶</button>' +
+                '<button class="row-x" data-collect-del="' + esc(col.id) + '" title="删除这条采集配方">✕</button>' +
               '</div>'
             );
           }
@@ -1465,19 +1803,223 @@
       // Typing must survive a re-render (the address bar asks for the list on
       // every keystroke and each answer repaints it).
       list.addEventListener('input', function (e) {
-        var rn = state.running;
         var el = e.target;
-        if (!rn || !el || !el.classList) return;
+        if (!el || !el.classList) return;
+        // Site-memory fields are not part of a recipe run; keep the draft so a
+        // repaint (a urlChanged push) does not eat what the user typed.
+        if (el.classList.contains('mem-input')) {
+          if (!el.classList.contains('mem-edit-input')) state.memDraft = el.value;
+          return;
+        }
+        var rn = state.running;
+        if (!rn) return;
         if (el.classList.contains('run-val')) rn.values[el.getAttribute('data-token')] = el.value;
         else if (el.classList.contains('run-file')) rn.values['file:' + el.getAttribute('data-step')] = el.value;
       });
 
+      list.addEventListener('keydown', function (e) {
+        if (e.key !== 'Enter') return;
+        var el = e.target;
+        if (!el || !el.classList) return;
+        if (el.classList.contains('mem-edit-input')) {
+          e.preventDefault();
+          var wrap = list.querySelector('[data-mem-edit-id]');
+          if (!wrap) return;
+          window.piSDK.request('siteMemory.update', { id: wrap.getAttribute('data-mem-edit-id'), text: el.value })
+            .then(function () {
+              state.memEditId = '';
+              state.memError = '';
+              refreshList();
+            })
+            .catch(memFail);
+        } else if (el.classList.contains('mem-input')) {
+          e.preventDefault();
+          addSiteMemory();
+        }
+      });
+
+      function memFail(err) {
+        state.memError = (err && err.message) || String(err);
+        renderList();
+      }
+
+      function addSiteMemory() {
+        var el = list.querySelector('.mem-add .mem-input:not(.mem-edit-input)');
+        var text = (el ? el.value : state.memDraft).trim();
+        if (!text) return;
+        window.piSDK.request('siteMemory.add', { url: state.url, text: text })
+          .then(function () {
+            state.memDraft = '';
+            state.memError = '';
+            refreshList();
+          })
+          .catch(memFail);
+      }
+
       list.addEventListener('click', function (e) {
         var target = e.target;
+        // ── Site memory ──
+        var memEditBtn = target.closest ? target.closest('[data-mem-edit]') : null;
+        if (memEditBtn) {
+          state.memEditId = memEditBtn.getAttribute('data-mem-edit');
+          state.memError = '';
+          renderList();
+          return;
+        }
+        var memToggleBtn = target.closest ? target.closest('[data-mem-toggle]') : null;
+        if (memToggleBtn) {
+          var mtId = memToggleBtn.getAttribute('data-mem-toggle');
+          var mtNote = state.memory.filter(function (n) { return n.id === mtId; })[0];
+          window.piSDK.request('siteMemory.update', {
+            id: mtId,
+            // An enabled note pauses; a paused one resumes.
+            enabled: !!(mtNote && mtNote.enabled === false),
+          }).then(refreshList).catch(memFail);
+          return;
+        }
+        var memResolveBtn = target.closest ? target.closest('[data-mem-resolve]') : null;
+        if (memResolveBtn) {
+          // The user checked the page: the note was right after all.
+          window.piSDK.request('siteMemory.resolve', {
+            id: memResolveBtn.getAttribute('data-mem-resolve'),
+          }).then(refreshList).catch(memFail);
+          return;
+        }
+        var memHistBtn = target.closest ? target.closest('[data-mem-history]') : null;
+        if (memHistBtn) {
+          state.memHistoryId = memHistBtn.getAttribute('data-mem-history');
+          state.memEditId = '';
+          renderList();
+          return;
+        }
+        var memRestoreBtn = target.closest ? target.closest('[data-mem-restore]') : null;
+        if (memRestoreBtn) {
+          state.memError = '';
+          window.piSDK.request('siteMemory.restore', {
+            id: state.memHistoryId,
+            at: Number(memRestoreBtn.getAttribute('data-mem-restore')),
+          }).then(function () {
+            state.memHistoryId = '';
+            refreshList();
+          }).catch(memFail);
+          return;
+        }
+        var memHistClose = target.closest ? target.closest('.mem-hist-close') : null;
+        if (memHistClose) {
+          state.memHistoryId = '';
+          renderList();
+          return;
+        }
+        var memConfirmBtn = target.closest ? target.closest('[data-mem-confirm]') : null;
+        if (memConfirmBtn) {
+          // Confirmation is the user putting their name on the AI's sentence.
+          window.piSDK.request('siteMemory.update', {
+            id: memConfirmBtn.getAttribute('data-mem-confirm'),
+            verified: true,
+          }).then(refreshList).catch(memFail);
+          return;
+        }
+        var memDelBtn = target.closest ? target.closest('[data-mem-del]') : null;
+        if (memDelBtn) {
+          window.piSDK.request('siteMemory.remove', { id: memDelBtn.getAttribute('data-mem-del') })
+            .then(refreshList)
+            .catch(memFail);
+          return;
+        }
+        var memSaveBtn = target.closest ? target.closest('.mem-edit-save') : null;
+        if (memSaveBtn) {
+          var memWrap = list.querySelector('[data-mem-edit-id]');
+          if (memWrap) {
+            window.piSDK.request('siteMemory.update', {
+              id: memWrap.getAttribute('data-mem-edit-id'),
+              text: memWrap.querySelector('.mem-edit-input').value,
+            }).then(function () {
+              state.memEditId = '';
+              state.memError = '';
+              refreshList();
+            }).catch(memFail);
+          }
+          return;
+        }
+        var memCancelBtn = target.closest ? target.closest('.mem-cancel') : null;
+        if (memCancelBtn) {
+          state.memEditId = '';
+          state.memError = '';
+          refreshList();
+          return;
+        }
+        var memAddBtn = target.closest ? target.closest('.mem-add-btn') : null;
+        if (memAddBtn) { addSiteMemory(); return; }
+
+        var recHistBtn = target.closest ? target.closest('[data-recipe-history]') : null;
+        if (recHistBtn) {
+          state.recipeHistoryId = recHistBtn.getAttribute('data-recipe-history');
+          state.editing = null;
+          state.running = null;
+          renderList();
+          return;
+        }
+        var recRestoreBtn = target.closest ? target.closest('[data-recipe-restore]') : null;
+        if (recRestoreBtn) {
+          act('recipes.restore', {
+            id: state.recipeHistoryId,
+            at: Number(recRestoreBtn.getAttribute('data-recipe-restore')),
+          }).then(function () {
+            state.recipeHistoryId = '';
+            refreshList();
+          }).catch(memFail);
+          return;
+        }
+        var histCloseBtn = target.closest ? target.closest('.hist-close') : null;
+        if (histCloseBtn) {
+          state.recipeHistoryId = '';
+          refreshList();
+          return;
+        }
+        // ── Collection runs ──
+        var collectRunBtn = target.closest ? target.closest('[data-collect-run]') : null;
+        if (collectRunBtn) {
+          var collectId = collectRunBtn.getAttribute('data-collect-run');
+          state.collectView = { id: collectId, busy: true, result: null, error: '' };
+          renderList();
+          act('collections.run', { id: collectId }).then(function (res) {
+            state.collectView = {
+              id: collectId,
+              busy: false,
+              result: res || {},
+              error: res && res.ok === false ? (res.error || '采集失败') : '',
+            };
+            refreshList();
+          }).catch(function (err) {
+            state.collectView = {
+              id: collectId,
+              busy: false,
+              result: null,
+              error: (err && err.message) || String(err),
+            };
+            renderList();
+          });
+          return;
+        }
+        var collectDelBtn = target.closest ? target.closest('[data-collect-del]') : null;
+        if (collectDelBtn) {
+          act('collections.remove', { id: collectDelBtn.getAttribute('data-collect-del') })
+            .then(refreshList)
+            .catch(memFail);
+          return;
+        }
+        var collectCloseBtn = target.closest ? target.closest('.collect-close') : null;
+        if (collectCloseBtn) {
+          state.collectView = null;
+          refreshList();
+          return;
+        }
+
         var eBtn = target.closest ? target.closest('[data-edit]') : null;
         if (eBtn) {
           var edId = eBtn.getAttribute('data-edit');
           state.running = null;
+          state.recipeHistoryId = '';
           state.editing = state.recipes.filter(function (r) { return r.id === edId; })[0] || null;
           renderList();
           return;
@@ -1488,6 +2030,7 @@
           var runId = runBtn.getAttribute('data-run');
           var pick = state.recipes.filter(function (r) { return r.id === runId; })[0] || null;
           state.editing = null;
+          state.recipeHistoryId = '';
           state.running = {
             id: runId,
             snapshot: pick,
@@ -1558,11 +2101,25 @@
       // ── Toolbar ──
       btnStar.addEventListener('click', function () {
         if (!isRecordable(state.url)) return;
+        // Read the prior state BEFORE the request: the backend broadcasts
+        // `ui.urlChanged` with the new `favorited` as part of the same call, so
+        // by the time the answer arrives this panel has already been updated.
+        var was = state.favorited;
         window.piSDK.request('favorites.toggle', { url: state.url, title: state.title })
           .then(function (res) {
             if (res && typeof res.favorited === 'boolean') {
               state.favorited = res.favorited;
               updateStar();
+              // Starring is the consent that turns site memory on. Show where
+              // the first line gets written instead of making the user find it.
+              // Unstarring only needs the open list repainted: the notes stay.
+              if (res.favorited && !was) {
+                var wasOpen = !omnibox.hidden;
+                openOmnibox();
+                if (wasOpen) refreshList();
+              } else if (!omnibox.hidden) {
+                refreshList();
+              }
             }
           })
           .catch(function (e) { console.warn('favorites.toggle', e && e.message ? e.message : e); });
@@ -1662,8 +2219,17 @@
       window.piSDK.onMessage(function (msg) {
         if (!msg || !msg.event || !msg.data) return;
         if (msg.event === 'ui.urlChanged') {
-          input.value = String(msg.data.url || '');
-          state.url = String(msg.data.url || '');
+          var nextUrl = String(msg.data.url || '');
+          // A real navigation means the site changed: a half-typed memory for
+          // the previous site must not follow the user to the next one.
+          if (nextUrl !== state.url) {
+            state.memDraft = '';
+            state.memEditId = '';
+            state.memHistoryId = '';
+            state.memError = '';
+          }
+          input.value = nextUrl;
+          state.url = nextUrl;
           state.title = String(msg.data.title || '');
           state.favorited = msg.data.favorited === true;
           updateStar();
@@ -1685,6 +2251,16 @@
           if (!newtab.hidden) renderNewTab();
         } else if (msg.event === 'ui.recipesChanged') {
           // A recipe's health follows every run — the agent's runs included.
+          if (!omnibox.hidden) refreshList();
+        } else if (msg.event === 'ui.siteMemoryChanged') {
+          // An agent write must show up in the panel immediately: the user
+          // has to be able to see (and undo) what the AI remembered.
+          if (!omnibox.hidden) refreshList();
+        } else if (msg.event === 'ui.siteRunsChanged') {
+          // A run's failure — or its clearing — changes the ledger.
+          if (!omnibox.hidden) refreshList();
+        } else if (msg.event === 'ui.collectionsChanged') {
+          // Agent-side add/run/remove must show up here without a reload.
           if (!omnibox.hidden) refreshList();
         } else if (msg.event === 'ui.settingsChanged') {
           state.private = msg.data.private === true;

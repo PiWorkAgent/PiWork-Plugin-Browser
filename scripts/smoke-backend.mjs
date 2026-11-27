@@ -20,6 +20,10 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const HISTORY_KEY = 'history.entries';
 const FAVORITES_KEY = 'favorites.items';
 const CLIPS_KEY = 'clips.items';
+const SITE_NOTES_KEY = 'site.notes';
+const RECIPES_KEY = 'recipes.items';
+const WORKFLOWS_KEY = 'workflows.items';
+const COLLECTIONS_KEY = 'collections.items';
 
 /** What chat.send said — the agent half of the selection-popup round trip. */
 const sentChats = [];
@@ -49,6 +53,31 @@ const fakePage = {
 };
 
 function fakeEvaluate(expression) {
+  // ── Collection runner ──
+  // The runner polls with `!!document.querySelector(...)` and reads with one
+  // generated function carrying its spec as JSON; echo both shapes.
+  if (expression.trim().startsWith('!!document.querySelector(')) return true;
+  const specMatch = expression.match(/const spec = (\{[\s\S]*?\});\s*\n\s*const nodes/);
+  if (specMatch) {
+    const spec = JSON.parse(specMatch[1]);
+    if (spec.scope === '.empty') return [];
+    if (spec.scope) {
+      const n = Math.min(Number(spec.limit) || 2, 2);
+      return Array.from({ length: n }, (_, i) => {
+        const row = {};
+        for (const f of spec.fields) {
+          row[f.key] =
+            f.attr === 'href' || f.key === 'link'
+              ? `https://shop.example.com/item${i + 1}`
+              : `${f.key}-${i + 1}`;
+        }
+        return row;
+      });
+    }
+    const one = {};
+    for (const f of spec.fields) one[f.key] = `detail-${f.key}`;
+    return [one];
+  }
   // ── Whole-page runtime (__piImt) ──
   // The install source also mentions extractArticle, so match the call shape
   // (`__piImt.extractArticle ?`) rather than the bare name.
@@ -607,6 +636,460 @@ check(
     store[FAVORITES_KEY][0].title === '持久化' &&
     store[FAVORITES_KEY][0].url === 'https://persisted.example',
   JSON.stringify(store[FAVORITES_KEY]),
+);
+
+// ── site memory: favorites are the consent boundary ──
+const SHOP = 'https://shop.example.com/orders';
+
+const noMem = await callTool('browser_site_memory', { url: SHOP, action: 'list' });
+check(
+  'site memory starts empty and says how to add one',
+  /还没有给/.test(noMem.content?.[0]?.text ?? ''),
+  noMem.content?.[0]?.text,
+);
+
+await panelRequest('m1', 'favorites.toggle', { url: SHOP, title: '商店后台' });
+const memAdd = await callTool('browser_site_memory', {
+  url: SHOP,
+  action: 'add',
+  text: '  公司电商后台，订单入口在左侧导航 Orders  ',
+});
+check(
+  "the agent's add stores one normalized, pending sentence",
+  /已记为待确认/.test(memAdd.content?.[0]?.text ?? '') &&
+    Array.isArray(store[SITE_NOTES_KEY]) &&
+    store[SITE_NOTES_KEY][0].text === '公司电商后台，订单入口在左侧导航 Orders' &&
+    store[SITE_NOTES_KEY][0].by === 'agent',
+  JSON.stringify(store[SITE_NOTES_KEY]),
+);
+
+const memNav = await callTool('browser_navigate', { url: SHOP });
+check(
+  'navigating injects the note, labelled as an unconfirmed AI observation',
+  /【本站记忆 · 1 条，其中 1 条未确认/.test(memNav.content?.[0]?.text ?? '') &&
+    /订单入口在左侧导航 Orders（AI 观察，未确认）/.test(memNav.content?.[0]?.text ?? '') &&
+    /以页面为准/.test(memNav.content?.[0]?.text ?? ''),
+  memNav.content?.[0]?.text,
+);
+
+const noteId = store[SITE_NOTES_KEY][0].id;
+check(
+  "the agent's add is stored as pending, not as fact",
+  store[SITE_NOTES_KEY][0].verified === false && store[SITE_NOTES_KEY][0].by === 'agent',
+  JSON.stringify(store[SITE_NOTES_KEY]),
+);
+
+// The agent may revise its OWN pending sentence.
+const pendingEdit = await callTool('browser_site_memory', {
+  action: 'update',
+  id: noteId,
+  text: '公司电商后台：订单在左侧导航 Orders',
+});
+check(
+  'the agent can revise its own pending note',
+  /已更新记忆/.test(pendingEdit.content?.[0]?.text ?? '') &&
+    store[SITE_NOTES_KEY][0].text === '公司电商后台：订单在左侧导航 Orders',
+  pendingEdit.content?.[0]?.text,
+);
+
+// Confirmation is the panel's job: the user puts their name on it.
+await panelRequest('m2', 'siteMemory.update', { id: noteId, verified: true });
+const confirmedNav = await callTool('browser_navigate', { url: SHOP });
+check(
+  'confirming in the panel drops the unconfirmed label from injection',
+  /【本站记忆 · 1 条，用户沉淀的长期知识】/.test(confirmedNav.content?.[0]?.text ?? '') &&
+    !/未确认/.test(confirmedNav.content?.[0]?.text ?? ''),
+  confirmedNav.content?.[0]?.text,
+);
+
+// A confirmed note is the user's: the agent may neither overwrite nor delete it.
+const confirmedEdit = await callTool('browser_site_memory', {
+  action: 'update',
+  id: noteId,
+  text: 'AI 偷偷覆盖',
+}).catch((e) => ({ error: e.message }));
+check(
+  'the agent cannot overwrite a confirmed note',
+  /用户已经确认/.test(confirmedEdit.error ?? '') && store[SITE_NOTES_KEY][0].text !== 'AI 偷偷覆盖',
+  JSON.stringify(confirmedEdit),
+);
+const confirmedDel = await callTool('browser_site_memory', { action: 'remove', id: noteId }).catch((e) => ({
+  error: e.message,
+}));
+check(
+  'the agent cannot delete a confirmed note',
+  /用户已经确认/.test(confirmedDel.error ?? '') && store[SITE_NOTES_KEY].length === 1,
+  JSON.stringify(confirmedDel),
+);
+
+// A paused note stays on file but stops being injected.
+await panelRequest('m3', 'siteMemory.update', { id: noteId, enabled: false });
+const offNav = await callTool('browser_navigate', { url: SHOP });
+check(
+  'a paused note is not injected',
+  !/【本站记忆/.test(offNav.content?.[0]?.text ?? '') && store[SITE_NOTES_KEY].length === 1,
+  offNav.content?.[0]?.text,
+);
+
+// Unfavoriting stops injection; the notes are the user's own writing and stay.
+await panelRequest('m4', 'favorites.toggle', { url: SHOP });
+const unfavNav = await callTool('browser_navigate', { url: SHOP });
+const unfavList = await callTool('browser_site_memory', { url: SHOP, action: 'list' });
+check(
+  'unfavoriting stops injection but keeps the notes',
+  !/【本站记忆/.test(unfavNav.content?.[0]?.text ?? '') &&
+    store[SITE_NOTES_KEY].length === 1 &&
+    /未收藏/.test(unfavList.content?.[0]?.text ?? ''),
+  unfavList.content?.[0]?.text,
+);
+
+// The panel writes as the user; re-enabling + re-favoriting restores injection.
+await panelRequest('m5', 'siteMemory.update', { id: noteId, enabled: true });
+await panelRequest('m6', 'favorites.toggle', { url: SHOP, title: '商店后台' });
+await panelRequest('m7', 'siteMemory.add', { url: SHOP, text: '导出默认只选已付款' });
+const memList = await callTool('browser_site_memory', { url: SHOP });
+check(
+  'list shows ids, edits and the user-authored note',
+  new RegExp(`\\[${noteId}\\]`).test(memList.content?.[0]?.text ?? '') &&
+    /订单在左侧导航 Orders/.test(memList.content?.[0]?.text ?? '') &&
+    /导出默认只选已付款/.test(memList.content?.[0]?.text ?? '') &&
+    store[SITE_NOTES_KEY].some((n) => n.by === 'user' && n.verified === true),
+  memList.content?.[0]?.text,
+);
+
+// ── learning offer: once per conversation+site, only when it can be acted on ──
+const act1 = await callTool('browser_act', { steps: [{ click: '[1]' }, { click: '[1]' }] });
+check(
+  'a successful multi-step run on a favorited site offers ONE fact to remember',
+  /本站已收藏：如果这次操作里有一条/.test(act1.content?.[0]?.text ?? ''),
+  act1.content?.[0]?.text,
+);
+const act2 = await callTool('browser_act', { steps: [{ click: '[1]' }, { click: '[1]' }] });
+check(
+  'the offer does not repeat for the same conversation and site',
+  !/本站已收藏：如果这次操作里有一条/.test(act2.content?.[0]?.text ?? ''),
+  act2.content?.[0]?.text,
+);
+
+// No offer while an unconfirmed note is already waiting for the user.
+const SHOP2 = 'https://shop2.example.com/x';
+await panelRequest('m8', 'favorites.toggle', { url: SHOP2, title: '第二个站' });
+const pending2 = await callTool('browser_site_memory', {
+  url: SHOP2,
+  action: 'add',
+  text: '列表每页 20 条',
+});
+const pending2Id = store[SITE_NOTES_KEY].find((n) => n.origin === 'https://shop2.example.com').id;
+await callTool('browser_navigate', { url: SHOP2 });
+const act3 = await callTool('browser_act', { steps: [{ click: '[1]' }, { click: '[1]' }] });
+check(
+  'no offer while an unconfirmed note is already pending',
+  /已记为待确认/.test(pending2.content?.[0]?.text ?? '') &&
+    !/本站已收藏：如果这次操作里有一条/.test(act3.content?.[0]?.text ?? ''),
+  act3.content?.[0]?.text,
+);
+
+// And none on a site the user did not favorite.
+const SHOP3 = 'https://unstarred.example.com/y';
+await callTool('browser_navigate', { url: SHOP3 });
+const act4 = await callTool('browser_act', { steps: [{ click: '[1]' }, { click: '[1]' }] });
+check(
+  'no offer on an unfavorited site',
+  !/本站已收藏：如果这次操作里有一条/.test(act4.content?.[0]?.text ?? ''),
+  act4.content?.[0]?.text,
+);
+
+// A disputed pending note is paused, and the agent may not keep editing it.
+const disputedPending = await callTool('browser_site_memory', {
+  url: SHOP2,
+  action: 'dispute',
+  id: pending2Id,
+  reason: '列表其实是无限滚动，没有分页',
+});
+const editSuspect = await callTool('browser_site_memory', {
+  url: SHOP2,
+  action: 'update',
+  id: pending2Id,
+  text: '改一下',
+}).catch((e) => ({ error: e.message }));
+const shop2Nav = await callTool('browser_navigate', { url: SHOP2 });
+check(
+  'a disputed pending note is paused and the agent cannot keep editing it',
+  /已把这条记忆标为可疑/.test(disputedPending.content?.[0]?.text ?? '') &&
+    /可疑/.test(editSuspect.error ?? '') &&
+    !/【本站记忆/.test(shop2Nav.content?.[0]?.text ?? ''),
+  JSON.stringify(editSuspect),
+);
+
+const userNoteId = store[SITE_NOTES_KEY].find((n) => n.by === 'user').id;
+await panelRequest('m9', 'siteMemory.remove', { id: userNoteId });
+await callTool('browser_site_memory', { url: SHOP2, action: 'remove', id: pending2Id });
+check(
+  'remove deletes exactly the requested note',
+  store[SITE_NOTES_KEY].length === 1 && store[SITE_NOTES_KEY][0].id === noteId,
+  JSON.stringify(store[SITE_NOTES_KEY]),
+);
+
+// ── revision history: every change leaves the previous state behind ──
+const textBeforeEdit = store[SITE_NOTES_KEY][0].text;
+await panelRequest('r1', 'siteMemory.update', { id: noteId, text: '公司电商后台：订单在左上角 Orders' });
+let revs = store[SITE_NOTES_KEY][0].revisions ?? [];
+const lastRev = revs[revs.length - 1];
+check(
+  'an edit keeps the previous sentence and who changed it',
+  lastRev && lastRev.text === textBeforeEdit && lastRev.by === 'user',
+  JSON.stringify(lastRev),
+);
+await panelRequest('r2', 'siteMemory.restore', { id: noteId, at: lastRev.at });
+revs = store[SITE_NOTES_KEY][0].revisions ?? [];
+check(
+  'restoring puts the previous sentence back (and records the restore)',
+  store[SITE_NOTES_KEY][0].text === textBeforeEdit && revs.length >= 2,
+  JSON.stringify(store[SITE_NOTES_KEY][0]),
+);
+
+// ── dispute on a confirmed note: report, pause, then the user resolves ──
+await callTool('browser_navigate', { url: SHOP }); // the note is injected context
+const noReason = await callTool('browser_site_memory', {
+  url: SHOP,
+  action: 'dispute',
+  id: noteId,
+  reason: '   ',
+}).catch((e) => ({ error: e.message }));
+check('a dispute without a reason is refused', /reason/.test(noReason.error ?? ''), JSON.stringify(noReason));
+
+const disputed = await callTool('browser_site_memory', {
+  url: SHOP,
+  action: 'dispute',
+  id: noteId,
+  reason: '页面上的订单入口已经移到右侧',
+});
+const disputedNav = await callTool('browser_navigate', { url: SHOP });
+const disputedList = await callTool('browser_site_memory', { url: SHOP, action: 'list' });
+check(
+  'a disputed note is marked suspect and stops being injected',
+  /已把这条记忆标为可疑/.test(disputed.content?.[0]?.text ?? '') &&
+    !/【本站记忆/.test(disputedNav.content?.[0]?.text ?? '') &&
+    /可疑/.test(disputedList.content?.[0]?.text ?? '') &&
+    store[SITE_NOTES_KEY][0].suspect?.reason === '页面上的订单入口已经移到右侧',
+  disputedList.content?.[0]?.text,
+);
+
+await panelRequest('r3', 'siteMemory.resolve', { id: noteId });
+const resolvedNav = await callTool('browser_navigate', { url: SHOP });
+check(
+  'resolving clears suspect, re-verifies and resumes injection',
+  !store[SITE_NOTES_KEY][0].suspect &&
+    store[SITE_NOTES_KEY][0].verified === true &&
+    /【本站记忆 · 1 条/.test(resolvedNav.content?.[0]?.text ?? ''),
+  resolvedNav.content?.[0]?.text,
+);
+
+// ── run ledger: a failure names the step, the error and the notes in play ──
+const failedAct = await callTool('browser_act', { steps: [{ click: '[99]' }] });
+const runsAfter = await panelRequest('r4', 'siteMemory.runs', { url: SHOP });
+const failure = (runsAfter?.result?.runs ?? [])[0];
+check(
+  'a failed run records its step, error and injected note ids',
+  /第 1 步失败/.test(failedAct.content?.[0]?.text ?? '') &&
+    failure?.ok === false &&
+    failure?.failedStep === 1 &&
+    failure?.injected?.includes(noteId) &&
+    /找不到元素/.test(failure?.error ?? ''),
+  JSON.stringify(failure),
+);
+check(
+  'a failed run does not silently punish the injected memory',
+  !store[SITE_NOTES_KEY][0].suspect && store[SITE_NOTES_KEY][0].verified === true,
+  JSON.stringify(store[SITE_NOTES_KEY][0]),
+);
+
+// ── recipe revisions: hand fixes are undoable ──
+const recList = await panelRequest('rp1', 'recipes.list', { url: SHOP });
+const rec = recList?.result?.recipes?.[0];
+check('the successful runs recorded a recipe to edit', !!rec && rec.steps.length === 2, JSON.stringify(rec));
+const recNameBefore = rec.name;
+const recStepsBefore = JSON.stringify(rec.steps);
+await panelRequest('rp2', 'recipes.update', { id: rec.id, name: '换个名字' });
+let storedRec = store[RECIPES_KEY].find((r) => r.id === rec.id);
+const recRev = (storedRec.revisions || []).slice(-1)[0];
+check(
+  'editing a recipe keeps the previous name and steps',
+  storedRec.name === '换个名字' && recRev && recRev.name === recNameBefore,
+  JSON.stringify(recRev),
+);
+await panelRequest('rp3', 'recipes.restore', { id: rec.id, at: recRev.at });
+storedRec = store[RECIPES_KEY].find((r) => r.id === rec.id);
+check(
+  'restoring a recipe brings the previous version back',
+  storedRec.name === recNameBefore && JSON.stringify(storedRec.steps) === recStepsBefore,
+  JSON.stringify(storedRec),
+);
+
+// ── workflows: cross-site routines ──
+const wfAdd = await callTool('browser_workflow', {
+  action: 'add',
+  name: '每周订单同步',
+  steps: [
+    { site: 'shop.example.com', text: '导出已付款订单', recipe: '导出订单' },
+    { site: 'dingtalk.com', text: '导入到订单表' },
+  ],
+});
+check(
+  'a workflow stores named, ordered steps with site and recipe',
+  /已保存工作流/.test(wfAdd.content?.[0]?.text ?? '') &&
+    store[WORKFLOWS_KEY]?.length === 1 &&
+    store[WORKFLOWS_KEY][0].steps[1].text === '导入到订单表' &&
+    store[WORKFLOWS_KEY][0].steps[0].recipe === '导出订单' &&
+    store[WORKFLOWS_KEY][0].createdBy === 'agent',
+  JSON.stringify(store[WORKFLOWS_KEY]),
+);
+const wfId = store[WORKFLOWS_KEY][0].id;
+const wfListed = await callTool('browser_workflow', { action: 'list' });
+check(
+  'workflow list renders the checklist with sites, recipes and ids',
+  new RegExp(`\\[${wfId}\\]`).test(wfListed.content?.[0]?.text ?? '') &&
+    /\[shop\.example\.com\] 导出已付款订单（用配方「导出订单」）/.test(wfListed.content?.[0]?.text ?? ''),
+  wfListed.content?.[0]?.text,
+);
+
+await panelRequest('wf1', 'workflows.update', { id: wfId, name: '每周订单同步 v2' });
+let storedWf = store[WORKFLOWS_KEY][0];
+const wfRev = (storedWf.revisions || []).slice(-1)[0];
+check(
+  'editing a workflow keeps the previous version',
+  storedWf.name === '每周订单同步 v2' && wfRev && wfRev.name === '每周订单同步',
+  JSON.stringify(wfRev),
+);
+await panelRequest('wf2', 'workflows.restore', { id: wfId, at: wfRev.at });
+check(
+  'restoring a workflow brings the old name back',
+  store[WORKFLOWS_KEY][0].name === '每周订单同步',
+  JSON.stringify(store[WORKFLOWS_KEY][0]),
+);
+
+const marked = await callTool('browser_workflow', {
+  action: 'mark',
+  id: wfId,
+  ok: false,
+  error: '导入页改版了',
+});
+check(
+  'mark records the run outcome for the user',
+  /已记录/.test(marked.content?.[0]?.text ?? '') &&
+    store[WORKFLOWS_KEY][0].uses === 1 &&
+    store[WORKFLOWS_KEY][0].lastError?.message === '导入页改版了',
+  JSON.stringify(store[WORKFLOWS_KEY][0]),
+);
+
+const overview = await panelRequest('ov1', 'memory.overview');
+check(
+  'the memory center overview carries sites, notes and workflows',
+  (overview?.result?.sites ?? []).some((s) => s.notes.length >= 1 && s.favorited) &&
+    (overview?.result?.workflows ?? []).length === 1,
+  JSON.stringify(overview?.result && {
+    sites: overview.result.sites.map((s) => [s.site, s.notes.length]),
+    workflows: overview.result.workflows.length,
+  }),
+);
+
+const wfRemoved = await callTool('browser_workflow', { action: 'remove', id: wfId });
+check(
+  'removing a workflow deletes it',
+  /已删除工作流/.test(wfRemoved.content?.[0]?.text ?? '') && store[WORKFLOWS_KEY].length === 0,
+  JSON.stringify(store[WORKFLOWS_KEY]),
+);
+
+// ── collections: deterministic reads ──
+const colAdd = await callTool('browser_collect', {
+  action: 'add',
+  name: '每日趋势',
+  url: 'https://shop.example.com/trending',
+  list: {
+    scope: '.row',
+    fields: [
+      { key: 'name', selector: '.name' },
+      { key: 'link', selector: 'a', attr: 'href' },
+      { key: 'desc', selector: '.desc' },
+    ],
+    limit: 2,
+  },
+  detail: {
+    urlField: 'link',
+    fields: [{ key: 'readme', selector: 'article' }],
+    waitFor: 'article',
+    count: 2,
+  },
+});
+check(
+  'a collection stores where to look, not what was there',
+  /已保存采集配方/.test(colAdd.content?.[0]?.text ?? '') &&
+    store[COLLECTIONS_KEY]?.length === 1 &&
+    store[COLLECTIONS_KEY][0].list.fields.length === 3 &&
+    store[COLLECTIONS_KEY][0].detail.count === 2,
+  JSON.stringify(store[COLLECTIONS_KEY]),
+);
+const colId = store[COLLECTIONS_KEY][0].id;
+const colRun = await callTool('browser_collect', { action: 'run', id: colId });
+check(
+  'running a collection returns only the named fields, plus details',
+  /采集「每日趋势」：2 条/.test(colRun.content?.[0]?.text ?? '') &&
+    /name: name-1/.test(colRun.content?.[0]?.text ?? '') &&
+    /desc: desc-2/.test(colRun.content?.[0]?.text ?? '') &&
+    /https:\/\/shop\.example\.com\/item1/.test(colRun.content?.[0]?.text ?? '') &&
+    /readme: detail-readme/.test(colRun.content?.[0]?.text ?? ''),
+  colRun.content?.[0]?.text,
+);
+check(
+  'a successful run records health',
+  store[COLLECTIONS_KEY][0].uses === 1 &&
+    store[COLLECTIONS_KEY][0].failures === 0 &&
+    !store[COLLECTIONS_KEY][0].lastError,
+  JSON.stringify(store[COLLECTIONS_KEY][0]),
+);
+const colList = await callTool('browser_collect', { action: 'list' });
+check(
+  'collection list shows the id and the spec',
+  new RegExp(`\\[${colId}\\]`).test(colList.content?.[0]?.text ?? '') &&
+    /列表取 name \/ link \/ desc/.test(colList.content?.[0]?.text ?? '') &&
+    /进前 2 条取 readme/.test(colList.content?.[0]?.text ?? ''),
+  colList.content?.[0]?.text,
+);
+
+const colOverview = await panelRequest('col1', 'memory.overview');
+check(
+  'the memory center overview carries collections per site',
+  (colOverview?.result?.sites ?? []).some((s) =>
+    s.collections.some((c) => c.id === colId),
+  ),
+  JSON.stringify((colOverview?.result?.sites ?? []).map((s) => [s.site, s.collections.length])),
+);
+
+// A selector that never matches: two runs retire it, with a reason.
+await callTool('browser_collect', {
+  action: 'add',
+  name: '坏配方',
+  url: 'https://shop.example.com/x',
+  list: { scope: '.empty', fields: [{ key: 'name', selector: '.n' }] },
+});
+const badId = store[COLLECTIONS_KEY].find((c) => c.name === '坏配方').id;
+await callTool('browser_collect', { action: 'run', id: badId });
+const bad2 = await callTool('browser_collect', { action: 'run', id: badId });
+const badList = await callTool('browser_collect', { action: 'list' });
+check(
+  'two empty runs mark a collection stale and say why',
+  store[COLLECTIONS_KEY].find((c) => c.id === badId).failures === 2 &&
+    /已失效/.test(badList.content?.[0]?.text ?? '') &&
+    /列表一条也没取到/.test(bad2.content?.[0]?.text ?? ''),
+  bad2.content?.[0]?.text,
+);
+
+await callTool('browser_collect', { action: 'remove', id: badId });
+await panelRequest('col2', 'collections.remove', { id: colId });
+check(
+  'removing collections empties the store',
+  store[COLLECTIONS_KEY].length === 0,
+  JSON.stringify(store[COLLECTIONS_KEY]),
 );
 
 // ── selection popup: inject → click → poll → act → show ──

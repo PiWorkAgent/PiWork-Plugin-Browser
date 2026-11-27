@@ -5,8 +5,9 @@
  * Tools: browser_navigate / browser_get_state / browser_find / browser_click /
  * browser_fill / browser_hover / browser_select / browser_scroll /
  * browser_evaluate / browser_walk / browser_screenshot /
- * browser_history_search / browser_favorites_list /
- * browser_show / browser_clips_list, plus the tab set:
+ * browser_history_search / browser_favorites_list / browser_site_memory /
+ * browser_workflow / browser_collect / browser_show / browser_clips_list,
+ * plus the tab set:
  * browser_tab_list / browser_tab_open / browser_tab_switch / browser_tab_close.
  *
  * The panel (address-bar toolbar + tab strip + omnibox dropdown) is this
@@ -70,6 +71,72 @@ const SETTINGS_KEY = 'settings';
  * is asked to confirm a save they already asked for by favoriting.
  */
 const RECIPES_KEY = 'recipes.items';
+/**
+ * Site memory: the handful of things the user knows about a site they work in
+ * regularly — what it IS, where things live, what not to touch. Kept by
+ * origin and injected only on FAVORITED sites: favorites are the consent
+ * boundary, exactly as they are for recipes. Notes outlive unfavoriting —
+ * they are the user's own writing — but injection stops until it is back.
+ */
+const SITE_NOTES_KEY = 'site.notes';
+/**
+ * The run ledger: recent browser_act runs on favorited sites, with the note
+ * ids that were injected into context for them. This is what makes a failure
+ * explainable — "which experience was in play when this broke" — without
+ * guessing that a note caused it.
+ */
+const SITE_RUNS_KEY = 'site.runs';
+
+/** Runs kept, newest first. */
+const SITE_RUNS_MAX = 50;
+
+/** How long a navigation's injected memory counts as context for a run. */
+const INJECTION_TTL_MS = 30 * 60_000;
+
+/** Revisions kept per note; old ones fall off the back. */
+const NOTE_REVISIONS_MAX = 10;
+
+/**
+ * Workflows: named, user-owned routines that span sites ("export orders here,
+ * import them there"). A workflow is a readable checklist that points at
+ * recipes, not an executable script — the agent still drives the browser, so
+ * every step stays visible and every site gate stays the user's.
+ */
+const WORKFLOWS_KEY = 'workflows.items';
+const WORKFLOWS_MAX = 100;
+const WORKFLOW_STEPS_MAX = 20;
+const WORKFLOW_REVISIONS_MAX = 10;
+
+/**
+ * Collections: a recorded, deterministic read of a stable page — open a URL,
+ * extract named fields from a list, optionally open the first few items and
+ * extract fields there. Unlike an action recipe, this returns DATA, with no
+ * model in the loop: the browser executes the stored selectors and hands back
+ * only the requested fields. The page content is never stored — each run reads
+ * it fresh.
+ */
+const COLLECTIONS_KEY = 'collections.items';
+const COLLECTIONS_MAX = 50;
+const COLLECT_FIELDS_MAX = 12;
+const COLLECT_ROWS_MAX = 50;
+const COLLECT_DETAIL_MAX = 5;
+/** One field value is a line, not a document. */
+const COLLECT_VALUE_MAX_CHARS = 600;
+const COLLECT_WAIT_MS = 8_000;
+
+/** One note is a sentence; the cap keeps a pasted document from becoming "memory". */
+const SITE_NOTE_MAX_CHARS = 240;
+
+/** Notes one origin may accumulate before the panel asks for a prune. */
+const SITE_NOTES_MAX = 40;
+
+/**
+ * Notes injected into one navigation, and their total character budget. This
+ * rides on EVERY navigation to the site, so it is the one place where a
+ * little prose becomes a recurring cost.
+ */
+const SITE_NOTE_INJECT_MAX = 8;
+const SITE_NOTE_INJECT_CHARS = 700;
 
 /**
  * Longest history we keep, newest first.
@@ -191,6 +258,158 @@ interface Recipe {
    * "已失效" without a reason makes the user open the editor and guess.
    */
   lastError?: { step: number; message: string; at: number };
+  /** States before each user edit, oldest first — restore is one click. */
+  revisions?: RecipeRevision[];
+}
+
+/** One previous version of a recipe, kept for the panel's history view. */
+interface RecipeRevision {
+  at: number;
+  by: 'user' | 'agent';
+  name: string;
+  steps: RecipeStep[];
+}
+
+/**
+ * One previous state of a note, kept so a person can see what an edit changed
+ * and put it back. Stored as the state BEFORE the change: restoring is just
+ * applying this row.
+ */
+interface NoteRevision {
+  at: number;
+  by: 'user' | 'agent';
+  text: string;
+  verified: boolean;
+  enabled: boolean;
+}
+
+/**
+ * One line of long-term knowledge about a favorited site. The user types most
+ * of them in the panel; the agent may add one when explicitly asked to
+ * remember something. `by` is kept so the panel can say who wrote what —
+ * "the AI decided this" is a different claim from "I wrote this".
+ */
+interface SiteNote {
+  id: string;
+  /** Origin the note belongs to (https://admin.shopify.com). */
+  origin: string;
+  /** Registrable domain, for display. */
+  site: string;
+  text: string;
+  by: 'user' | 'agent';
+  /**
+   * A person has confirmed this sentence. Notes typed in the panel start true;
+   * notes the agent writes start false and wait in the panel's 待确认 group.
+   * Unconfirmed notes are still injected — they save exploration — but they
+   * are labelled as the agent's unconfirmed observation, and the page wins on
+   * conflict. Confirmation is the difference between "the AI thinks" and
+   * "we know".
+   */
+  verified: boolean;
+  createdAt: number;
+  updatedAt: number;
+  /** Injected while true — the panel's off switch. */
+  enabled: boolean;
+  /**
+   * An agent saw the page contradict this note and reported it. A suspect
+   * note is NOT injected until the user resolves it — a memory known to be
+   * wrong is worse than none.
+   */
+  suspect?: { at: number; reason: string; url: string };
+  /** Previous states, oldest first. Latest change is last. */
+  revisions?: NoteRevision[];
+}
+
+/** One browser_act run on a favorited site, kept for the failure ledger. */
+interface RunRecord {
+  id: string;
+  at: number;
+  origin: string;
+  ok: boolean;
+  steps: number;
+  /** 1-based; 0 when the run succeeded. */
+  failedStep: number;
+  error?: string;
+  recipeName?: string;
+  /** Note ids injected into the navigation that preceded this run. */
+  injected: string[];
+}
+
+/** One line of a cross-site routine. */
+interface WorkflowStep {
+  text: string;
+  /** Where this step happens: origin or registrable domain. Optional. */
+  site?: string;
+  /** A saved recipe to use for this step, by name. Optional. */
+  recipe?: string;
+}
+
+interface WorkflowRevision {
+  at: number;
+  by: 'user' | 'agent';
+  name: string;
+  steps: WorkflowStep[];
+}
+
+/**
+ * A named routine the user repeats across sites. It is stored globally, not
+ * per origin, because its whole point is the seam between sites.
+ */
+interface Workflow {
+  id: string;
+  name: string;
+  steps: WorkflowStep[];
+  createdBy: 'user' | 'agent';
+  createdAt: number;
+  updatedAt: number;
+  uses: number;
+  lastOk?: number;
+  lastError?: { at: number; message: string };
+  revisions?: WorkflowRevision[];
+}
+
+/** One value pulled out of a page: a key + where to find it. */
+interface CollectField {
+  /** Output key, e.g. "name". */
+  key: string;
+  /** CSS selector relative to the row/page; '' means the node itself. */
+  selector: string;
+  /** 'text' (default), 'href', or any attribute name. */
+  attr?: string;
+}
+
+interface Collection {
+  id: string;
+  origin: string;
+  site: string;
+  name: string;
+  /** The page opened first. */
+  url: string;
+  list: {
+    /** CSS of one row; '' reads a single record from the page. */
+    scope: string;
+    fields: CollectField[];
+    /** Rows returned at most. */
+    limit: number;
+  };
+  detail?: {
+    /** The list field that holds each item's URL. */
+    urlField: string;
+    /** Fields read on the opened page. */
+    fields: CollectField[];
+    /** Selector to wait for before reading the detail page. */
+    waitFor?: string;
+    /** How many of the first rows to open. */
+    count: number;
+  };
+  createdBy: 'user' | 'agent';
+  createdAt: number;
+  updatedAt: number;
+  uses: number;
+  lastOk?: number;
+  /** Consecutive failed runs; two marks it stale. */
+  failures: number;
+  lastError?: { at: number; message: string };
 }
 
 /** A piece of page text the user kept. */
@@ -949,6 +1168,14 @@ function pushTabs(ctx: PluginContext, hostTabId?: string): void {
 let history: HistoryEntry[] = [];
 let favorites: Favorite[] = [];
 let recipes: Recipe[] = [];
+let siteNotes: SiteNote[] = [];
+let runLog: RunRecord[] = [];
+let workflows: Workflow[] = [];
+let collections: Collection[] = [];
+/** `${session}|${origin}` → what the last navigation put in front of the agent. */
+const lastInjected = new Map<string, { ids: string[]; at: number }>();
+/** `${session}|${origin}` pairs already offered a fact after a successful run. */
+const memoryNudged = new Set<string>();
 /** Kept page text, newest first. */
 let clips: Clip[] = [];
 /** On, navigations are not recorded. Favorites still work — they are explicit. */
@@ -1162,6 +1389,674 @@ function isFavoriteOrigin(origin: string): boolean {
   return !!origin && favorites.some((f) => originOfUrl(f.url) === origin);
 }
 
+// ── Site memory: what the user taught us about this site ─────────────────
+
+function notesFor(origin: string): SiteNote[] {
+  return origin ? siteNotes.filter((n) => n.origin === origin) : [];
+}
+
+function liveNotes(origin: string): SiteNote[] {
+  // Suspect notes are paused on purpose: once the page has contradicted one,
+  // feeding it back before the user decides is how a wrong fact compounds.
+  return notesFor(origin).filter((n) => n.enabled !== false && !n.suspect);
+}
+
+/**
+ * The block browser_navigate adds for a site the user favorited, plus the ids
+ * it actually showed — the ledger needs to know exactly what was in play.
+ * Empty when the user taught nothing, so untouched sites cost a navigation
+ * nothing. Capped twice (count and characters): this rides on every
+ * navigation here, which is exactly where token cost lives.
+ */
+function siteMemoryDigest(origin: string): { text: string; ids: string[] } {
+  const empty = { text: '', ids: [] as string[] };
+  if (!isFavoriteOrigin(origin)) return empty;
+  const notes = liveNotes(origin);
+  if (notes.length === 0) return empty;
+  const shown: SiteNote[] = [];
+  let used = 0;
+  for (const note of notes.slice(0, SITE_NOTE_INJECT_MAX)) {
+    if (shown.length > 0 && used + note.text.length > SITE_NOTE_INJECT_CHARS) break;
+    shown.push(note);
+    used += note.text.length;
+  }
+  const rest = notes.length - shown.length;
+  const pending = notes.filter((n) => n.verified === false).length;
+  return {
+    ids: shown.map((n) => n.id),
+    text:
+      `【本站记忆 · ${notes.length} 条${pending > 0 ? `，其中 ${pending} 条未确认` : ''}，用户沉淀的长期知识】\n` +
+      shown.map((n) => `- ${n.text}${n.verified === false ? '（AI 观察，未确认）' : ''}`).join('\n') +
+      (rest > 0 ? `\n（另有 ${rest} 条，用 browser_site_memory 查看）` : '') +
+      '\n这是记忆，不是当前页面的实时状态：与页面不符时以页面为准，用 browser_site_memory 的 dispute 报告哪条不对（它会被标为可疑、暂停提供）。',
+  };
+}
+
+/**
+ * One offer per conversation per site to remember a fact after a successful
+ * multi-step run. Hard-gated on purpose: no unconfirmed note may already be
+ * waiting (an inbox the model fills faster than a person can empty is noise),
+ * and the user must have favorited the site — favoriting is the consent.
+ */
+function memoryLearningHint(sessionKey: string | null, origin: string, stepCount: number): string {
+  if (stepCount < 2 || !origin || !isFavoriteOrigin(origin)) return '';
+  if (notesFor(origin).some((n) => n.verified === false)) return '';
+  const key = `${sessionKey ?? ''}|${origin}`;
+  if (memoryNudged.has(key)) return '';
+  // A long-lived process can see many conversations; the set is only a "said
+  // this already" guard, so dropping it wholesale is harmless.
+  if (memoryNudged.size > 1000) memoryNudged.clear();
+  memoryNudged.add(key);
+  return (
+    '\n\n（本站已收藏：如果这次操作里有一条下次能省事的、可验证的事实——入口在哪、字段叫什么、操作后页面怎么变——' +
+    '可以用 browser_site_memory 记一条，用户在面板里确认后转正；判断性的规矩不要自己写。）'
+  );
+}
+
+/** One sentence, whitespace folded — a note is never a document. */
+function normalizeNoteText(input: unknown): string {
+  return String(input ?? '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, SITE_NOTE_MAX_CHARS);
+}
+
+function newNoteId(): string {
+  return `m${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+}
+
+async function addSiteNote(
+  ctx: PluginContext,
+  url: string,
+  text: string,
+  by: SiteNote['by'],
+): Promise<SiteNote> {
+  const origin = originOfUrl(url);
+  if (!origin) throw new Error('这个页面还没有网址，先打开一个网页');
+  const clean = normalizeNoteText(text);
+  if (!clean) throw new Error('写一句这个网站的用途或注意事项');
+  const mine = notesFor(origin);
+  if (mine.length >= SITE_NOTES_MAX) {
+    throw new Error(`本站记忆已经有 ${SITE_NOTES_MAX} 条，先删掉一些再记`);
+  }
+  const now = Date.now();
+  const note: SiteNote = {
+    id: newNoteId(),
+    origin,
+    site: siteOf(url),
+    text: clean,
+    by,
+    // A person's own sentence is confirmed by definition; the agent's is a
+    // proposal until the user confirms it in the panel.
+    verified: by === 'user',
+    createdAt: now,
+    updatedAt: now,
+    enabled: true,
+  };
+  siteNotes = [note, ...siteNotes];
+  await save(ctx, SITE_NOTES_KEY, siteNotes, 'site memory');
+  broadcast(ctx, 'ui.siteMemoryChanged', { origin });
+  return note;
+}
+
+/** Remember the state BEFORE a change, so the panel can show and undo it. */
+function pushRevision(note: SiteNote, by: 'user' | 'agent'): void {
+  note.revisions = [
+    ...(note.revisions ?? []),
+    { at: Date.now(), by, text: note.text, verified: note.verified, enabled: note.enabled },
+  ].slice(-NOTE_REVISIONS_MAX);
+}
+
+async function updateSiteNote(
+  ctx: PluginContext,
+  id: string,
+  patch: { text?: unknown; enabled?: unknown; verified?: unknown },
+  by: 'user' | 'agent',
+): Promise<SiteNote> {
+  const note = siteNotes.find((n) => n.id === id);
+  if (!note) throw new Error('没有找到这条记忆');
+  let nextText: string | undefined;
+  if (typeof patch.text === 'string') {
+    nextText = normalizeNoteText(patch.text);
+    if (!nextText) throw new Error('记忆不能为空，不需要就删掉');
+  }
+  const nextEnabled = typeof patch.enabled === 'boolean' ? patch.enabled : undefined;
+  const nextVerified = typeof patch.verified === 'boolean' ? patch.verified : undefined;
+  const changes =
+    (nextText !== undefined && nextText !== note.text) ||
+    (nextEnabled !== undefined && nextEnabled !== note.enabled) ||
+    (nextVerified !== undefined && nextVerified !== note.verified);
+  if (changes) pushRevision(note, by);
+  if (nextText !== undefined) note.text = nextText;
+  if (nextEnabled !== undefined) note.enabled = nextEnabled;
+  if (nextVerified !== undefined) note.verified = nextVerified;
+  note.updatedAt = Date.now();
+  await save(ctx, SITE_NOTES_KEY, siteNotes, 'site memory');
+  broadcast(ctx, 'ui.siteMemoryChanged', { origin: note.origin });
+  return note;
+}
+
+async function removeSiteNote(ctx: PluginContext, id: string): Promise<SiteNote> {
+  const note = siteNotes.find((n) => n.id === id);
+  if (!note) throw new Error('没有找到这条记忆');
+  siteNotes = siteNotes.filter((n) => n !== note);
+  await save(ctx, SITE_NOTES_KEY, siteNotes, 'site memory');
+  broadcast(ctx, 'ui.siteMemoryChanged', { origin: note.origin });
+  return note;
+}
+
+/**
+ * The agent's only way to challenge a note: it does not edit or delete — it
+ * says "the page disagrees, here is how". That removes the note from future
+ * injections until the user decides.
+ */
+async function disputeSiteNote(
+  ctx: PluginContext,
+  id: string,
+  reason: string,
+  url: string,
+): Promise<SiteNote> {
+  const note = siteNotes.find((n) => n.id === id);
+  if (!note) throw new Error('没有找到这条记忆');
+  const clean = normalizeNoteText(reason);
+  if (!clean) throw new Error('dispute 需要 reason：页面和这条记忆哪里不符');
+  note.suspect = { at: Date.now(), reason: clean, url };
+  note.updatedAt = Date.now();
+  await save(ctx, SITE_NOTES_KEY, siteNotes, 'site memory');
+  broadcast(ctx, 'ui.siteMemoryChanged', { origin: note.origin });
+  return note;
+}
+
+/** The user looked at the dispute and says the note still holds. */
+async function resolveSiteNote(ctx: PluginContext, id: string): Promise<SiteNote> {
+  const note = siteNotes.find((n) => n.id === id);
+  if (!note) throw new Error('没有找到这条记忆');
+  if (!note.suspect) throw new Error('这条记忆没有被标记为可疑');
+  pushRevision(note, 'user');
+  delete note.suspect;
+  // Resolving only happens after a person checked the page, which is exactly
+  // what confirmation means.
+  note.verified = true;
+  note.updatedAt = Date.now();
+  await save(ctx, SITE_NOTES_KEY, siteNotes, 'site memory');
+  broadcast(ctx, 'ui.siteMemoryChanged', { origin: note.origin });
+  return note;
+}
+
+/** Put a note back to one of its recorded states (restore is a user action). */
+async function restoreSiteNote(ctx: PluginContext, id: string, at: number): Promise<SiteNote> {
+  const note = siteNotes.find((n) => n.id === id);
+  if (!note) throw new Error('没有找到这条记忆');
+  const revision = (note.revisions ?? []).find((r) => r.at === at);
+  if (!revision) throw new Error('没有找到这条历史记录');
+  pushRevision(note, 'user');
+  note.text = revision.text;
+  note.verified = revision.verified;
+  note.enabled = revision.enabled;
+  delete note.suspect;
+  note.updatedAt = Date.now();
+  await save(ctx, SITE_NOTES_KEY, siteNotes, 'site memory');
+  broadcast(ctx, 'ui.siteMemoryChanged', { origin: note.origin });
+  return note;
+}
+
+/**
+ * Append one browser_act run to the site's ledger. Favorited origins only:
+ * the ledger exists to explain long-term sites, not every page ever touched.
+ */
+async function recordRun(
+  ctx: PluginContext,
+  run: Omit<RunRecord, 'id'>,
+): Promise<void> {
+  if (!isFavoriteOrigin(run.origin)) return;
+  const record: RunRecord = {
+    id: `x${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`,
+    ...run,
+  };
+  runLog = [record, ...runLog].slice(0, SITE_RUNS_MAX);
+  await save(ctx, SITE_RUNS_KEY, runLog, 'site runs');
+  broadcast(ctx, 'ui.siteRunsChanged', { origin: run.origin });
+}
+
+// ── Workflows: user-owned routines across sites ──────────────────────────
+
+function normalizeWorkflowSteps(input: unknown): WorkflowStep[] {
+  if (!Array.isArray(input)) return [];
+  const out: WorkflowStep[] = [];
+  for (const raw of input.slice(0, WORKFLOW_STEPS_MAX)) {
+    if (!raw || typeof raw !== 'object') continue;
+    const r = raw as Record<string, unknown>;
+    const text = normalizeNoteText(r.text);
+    if (!text) continue;
+    const site = typeof r.site === 'string' ? r.site.trim().slice(0, 120) : '';
+    const recipe = typeof r.recipe === 'string' ? r.recipe.trim().slice(0, 80) : '';
+    out.push({ text, ...(site ? { site } : {}), ...(recipe ? { recipe } : {}) });
+  }
+  return out;
+}
+
+function normalizeWorkflowRevisions(input: unknown): WorkflowRevision[] {
+  if (!Array.isArray(input)) return [];
+  return input
+    .filter((v) => v && Array.isArray(v.steps))
+    .map((v) => ({
+      at: Number(v.at) || Date.now(),
+      by: v.by === 'agent' ? ('agent' as const) : ('user' as const),
+      name: String(v.name ?? ''),
+      steps: normalizeWorkflowSteps(v.steps),
+    }))
+    .slice(-WORKFLOW_REVISIONS_MAX);
+}
+
+function workflowById(id: string): Workflow | undefined {
+  return workflows.find((w) => w.id === id);
+}
+
+function pushWorkflowRevision(workflow: Workflow, by: 'user' | 'agent'): void {
+  workflow.revisions = [
+    ...(workflow.revisions ?? []),
+    { at: Date.now(), by, name: workflow.name, steps: workflow.steps.map((s) => ({ ...s })) },
+  ].slice(-WORKFLOW_REVISIONS_MAX);
+}
+
+function workflowStepsKey(steps: WorkflowStep[]): string {
+  return JSON.stringify(steps.map((s) => [s.text, s.site ?? '', s.recipe ?? '']));
+}
+
+async function addWorkflow(
+  ctx: PluginContext,
+  name: string,
+  steps: WorkflowStep[],
+  by: 'user' | 'agent',
+): Promise<Workflow> {
+  const cleanName = normalizeNoteText(name).slice(0, 80);
+  if (!cleanName) throw new Error('工作流需要一个名字');
+  if (steps.length === 0) throw new Error('工作流至少要有一步');
+  if (workflows.length >= WORKFLOWS_MAX) throw new Error(`工作流已经有 ${WORKFLOWS_MAX} 个，先删掉一些`);
+  const now = Date.now();
+  const workflow: Workflow = {
+    id: `w${now.toString(36)}${Math.random().toString(36).slice(2, 5)}`,
+    name: cleanName,
+    steps,
+    createdBy: by,
+    createdAt: now,
+    updatedAt: now,
+    uses: 0,
+  };
+  workflows = [workflow, ...workflows];
+  await save(ctx, WORKFLOWS_KEY, workflows, 'workflows');
+  broadcast(ctx, 'ui.workflowsChanged', { id: workflow.id });
+  return workflow;
+}
+
+async function updateWorkflow(
+  ctx: PluginContext,
+  id: string,
+  patch: { name?: string; steps?: WorkflowStep[] },
+  by: 'user' | 'agent',
+): Promise<Workflow> {
+  const workflow = workflowById(id);
+  if (!workflow) throw new Error('没有找到这个工作流');
+  const nextName = patch.name === undefined ? workflow.name : normalizeNoteText(patch.name).slice(0, 80);
+  if (!nextName) throw new Error('工作流需要一个名字');
+  const nextSteps = patch.steps === undefined ? workflow.steps : patch.steps;
+  if (nextSteps.length === 0) throw new Error('工作流至少要有一步');
+  const changed =
+    nextName !== workflow.name || workflowStepsKey(nextSteps) !== workflowStepsKey(workflow.steps);
+  if (changed) pushWorkflowRevision(workflow, by);
+  workflow.name = nextName;
+  workflow.steps = nextSteps;
+  workflow.updatedAt = Date.now();
+  await save(ctx, WORKFLOWS_KEY, workflows, 'workflows');
+  broadcast(ctx, 'ui.workflowsChanged', { id: workflow.id });
+  return workflow;
+}
+
+async function removeWorkflow(ctx: PluginContext, id: string): Promise<Workflow> {
+  const workflow = workflowById(id);
+  if (!workflow) throw new Error('没有找到这个工作流');
+  workflows = workflows.filter((w) => w !== workflow);
+  await save(ctx, WORKFLOWS_KEY, workflows, 'workflows');
+  broadcast(ctx, 'ui.workflowsChanged', { id: workflow.id });
+  return workflow;
+}
+
+async function restoreWorkflow(ctx: PluginContext, id: string, at: number): Promise<Workflow> {
+  const workflow = workflowById(id);
+  if (!workflow) throw new Error('没有找到这个工作流');
+  const revision = (workflow.revisions ?? []).find((r) => r.at === at);
+  if (!revision) throw new Error('没有找到这条历史记录');
+  pushWorkflowRevision(workflow, 'user');
+  workflow.name = revision.name;
+  workflow.steps = revision.steps;
+  workflow.updatedAt = Date.now();
+  await save(ctx, WORKFLOWS_KEY, workflows, 'workflows');
+  broadcast(ctx, 'ui.workflowsChanged', { id: workflow.id });
+  return workflow;
+}
+
+async function markWorkflow(
+  ctx: PluginContext,
+  id: string,
+  ok: boolean,
+  error: string,
+): Promise<Workflow> {
+  const workflow = workflowById(id);
+  if (!workflow) throw new Error('没有找到这个工作流');
+  workflow.uses += 1;
+  workflow.updatedAt = Date.now();
+  if (ok) {
+    workflow.lastOk = Date.now();
+    delete workflow.lastError;
+  } else {
+    workflow.lastError = {
+      at: Date.now(),
+      message: normalizeNoteText(error).slice(0, 300) || '失败（没有记录原因）',
+    };
+  }
+  await save(ctx, WORKFLOWS_KEY, workflows, 'workflows');
+  broadcast(ctx, 'ui.workflowsChanged', { id: workflow.id });
+  return workflow;
+}
+
+// ── Collections: recorded deterministic reads ───────────────────────────
+
+function normalizeCollectFields(input: unknown): CollectField[] {
+  if (!Array.isArray(input)) return [];
+  const out: CollectField[] = [];
+  for (const raw of input.slice(0, COLLECT_FIELDS_MAX)) {
+    if (!raw || typeof raw !== 'object') continue;
+    const r = raw as Record<string, unknown>;
+    const key = String(r.key ?? '').trim().slice(0, 40);
+    if (!key) continue;
+    const selector = String(r.selector ?? '').trim().slice(0, 300);
+    const attr = typeof r.attr === 'string' ? r.attr.trim().slice(0, 40) : '';
+    out.push({ key, selector, ...(attr && attr !== 'text' ? { attr } : {}) });
+  }
+  return out;
+}
+
+interface CollectionSpecInput {
+  name: string;
+  url: string;
+  list: { scope: string; fields: CollectField[]; limit: number };
+  detail?: { urlField: string; fields: CollectField[]; waitFor?: string; count: number };
+}
+
+function collectionSpecFrom(input: Record<string, unknown>): CollectionSpecInput {
+  const url = normalizeUrl(String(input.url ?? '').trim());
+  const name = normalizeNoteText(input.name).slice(0, 80);
+  if (!name) throw new Error('采集配方需要一个名字');
+  const listRaw = (input.list ?? {}) as Record<string, unknown>;
+  const fields = normalizeCollectFields(listRaw.fields);
+  if (fields.length === 0) {
+    throw new Error('list.fields 至少要有 1 个字段：{ key, selector }');
+  }
+  const scope = typeof listRaw.scope === 'string' ? listRaw.scope.trim().slice(0, 300) : '';
+  const limit = Math.min(COLLECT_ROWS_MAX, Math.max(1, Number(listRaw.limit) || 20));
+  const detailRaw =
+    input.detail && typeof input.detail === 'object'
+      ? (input.detail as Record<string, unknown>)
+      : null;
+  let detail: CollectionSpecInput['detail'];
+  if (detailRaw) {
+    const urlField = String(detailRaw.urlField ?? '').trim();
+    const detailFields = normalizeCollectFields(detailRaw.fields);
+    if (urlField && detailFields.length > 0) {
+      detail = {
+        urlField: urlField.slice(0, 40),
+        fields: detailFields,
+        ...(typeof detailRaw.waitFor === 'string' && detailRaw.waitFor.trim()
+          ? { waitFor: detailRaw.waitFor.trim().slice(0, 300) }
+          : {}),
+        count: Math.min(COLLECT_DETAIL_MAX, Math.max(1, Number(detailRaw.count) || 3)),
+      };
+    }
+  }
+  return { name, url, list: { scope, fields, limit }, ...(detail ? { detail } : {}) };
+}
+
+/**
+ * The stored selectors become one page-side function. It returns ONLY the
+ * named fields — this is the whole point: the model never sees the page.
+ */
+function collectExpression(scope: string, fields: CollectField[], limit: number): string {
+  const spec = { scope, fields, limit };
+  return `(() => {
+    const spec = ${JSON.stringify(spec)};
+    const nodes = spec.scope ? Array.from(document.querySelectorAll(spec.scope)) : [document.documentElement];
+    return nodes.slice(0, spec.limit).map((node) => {
+      const rec = {};
+      for (const f of spec.fields) {
+        const el = f.selector ? node.querySelector(f.selector) : node;
+        if (!el) { rec[f.key] = ''; continue; }
+        const attr = f.attr || 'text';
+        let value;
+        if (attr === 'text') value = (el.textContent || '').trim().replace(/\\s+/g, ' ');
+        else if (attr === 'href') value = el.href || el.getAttribute('href') || '';
+        else value = el.getAttribute(attr) || '';
+        rec[f.key] = String(value).slice(0, ${COLLECT_VALUE_MAX_CHARS});
+      }
+      return rec;
+    });
+  })()`;
+}
+
+async function collectEvaluate(
+  ctx: PluginContext,
+  tid: string | undefined,
+  expression: string,
+): Promise<unknown> {
+  const r = await ctx.call<{ result?: unknown }>('browser.evaluate', {
+    expression,
+    ...(tid ? { tabId: tid } : {}),
+  });
+  return r?.result;
+}
+
+async function waitForSelector(
+  ctx: PluginContext,
+  tid: string | undefined,
+  selector: string,
+  timeoutMs = COLLECT_WAIT_MS,
+): Promise<boolean> {
+  if (!selector) return true;
+  const deadline = Date.now() + timeoutMs;
+  const expression = `!!document.querySelector(${JSON.stringify(selector)})`;
+  while (Date.now() < deadline) {
+    try {
+      if (await collectEvaluate(ctx, tid, expression)) return true;
+    } catch {
+      // The document may be mid-load; a throw here is not the answer yet.
+    }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  return false;
+}
+
+function collectionById(id: string): Collection | undefined {
+  return collections.find((c) => c.id === id);
+}
+
+interface CollectionRun {
+  ok: boolean;
+  list: Array<Record<string, string>>;
+  details: Array<{ url: string; fields: Record<string, string> }>;
+  error?: string;
+  ms: number;
+}
+
+async function addCollection(
+  ctx: PluginContext,
+  input: Record<string, unknown>,
+  by: 'user' | 'agent',
+): Promise<Collection> {
+  const spec = collectionSpecFrom(input);
+  if (collections.length >= COLLECTIONS_MAX) {
+    throw new Error(`采集配方已经有 ${COLLECTIONS_MAX} 个，先删掉一些`);
+  }
+  const now = Date.now();
+  const collection: Collection = {
+    id: `c${now.toString(36)}${Math.random().toString(36).slice(2, 5)}`,
+    origin: originOfUrl(spec.url),
+    site: siteOf(spec.url),
+    name: spec.name,
+    url: spec.url,
+    list: spec.list,
+    ...(spec.detail ? { detail: spec.detail } : {}),
+    createdBy: by,
+    createdAt: now,
+    updatedAt: now,
+    uses: 0,
+    failures: 0,
+  };
+  collections = [collection, ...collections];
+  await save(ctx, COLLECTIONS_KEY, collections, 'collections');
+  broadcast(ctx, 'ui.collectionsChanged', { id: collection.id });
+  return collection;
+}
+
+async function updateCollection(
+  ctx: PluginContext,
+  id: string,
+  input: Record<string, unknown>,
+): Promise<Collection> {
+  const collection = collectionById(id);
+  if (!collection) throw new Error('没有找到这个采集配方');
+  // A partial update keeps whatever was not sent: fixing one selector should
+  // not require re-sending the whole spec.
+  const spec = collectionSpecFrom({
+    name: input.name ?? collection.name,
+    url: input.url ?? collection.url,
+    list: input.list ?? collection.list,
+    detail: input.detail ?? collection.detail,
+  });
+  collection.name = spec.name;
+  collection.url = spec.url;
+  collection.origin = originOfUrl(spec.url);
+  collection.site = siteOf(spec.url);
+  collection.list = spec.list;
+  if (spec.detail) collection.detail = spec.detail;
+  else delete collection.detail;
+  collection.updatedAt = Date.now();
+  collection.failures = 0;
+  delete collection.lastError;
+  await save(ctx, COLLECTIONS_KEY, collections, 'collections');
+  broadcast(ctx, 'ui.collectionsChanged', { id: collection.id });
+  return collection;
+}
+
+async function removeCollection(ctx: PluginContext, id: string): Promise<Collection> {
+  const collection = collectionById(id);
+  if (!collection) throw new Error('没有找到这个采集配方');
+  collections = collections.filter((c) => c !== collection);
+  await save(ctx, COLLECTIONS_KEY, collections, 'collections');
+  broadcast(ctx, 'ui.collectionsChanged', { id: collection.id });
+  return collection;
+}
+
+async function recordCollectionRun(
+  ctx: PluginContext,
+  collection: Collection,
+  ok: boolean,
+  error: string,
+): Promise<void> {
+  collection.updatedAt = Date.now();
+  if (ok) {
+    collection.uses += 1;
+    collection.lastOk = Date.now();
+    collection.failures = 0;
+    delete collection.lastError;
+  } else {
+    collection.failures += 1;
+    collection.lastError = {
+      at: Date.now(),
+      message: normalizeNoteText(error).slice(0, 300) || '失败（没有记录原因）',
+    };
+  }
+  await save(ctx, COLLECTIONS_KEY, collections, 'collections');
+  broadcast(ctx, 'ui.collectionsChanged', { id: collection.id });
+}
+
+/**
+ * Execute a collection end to end: open the page, read the list, open the
+ * first N items, read their fields, return to the list. No model is involved
+ * at any point.
+ */
+async function runCollection(
+  ctx: PluginContext,
+  collection: Collection,
+  tid: string | undefined,
+): Promise<CollectionRun> {
+  const started = Date.now();
+  const tabArg = tid ? { tabId: tid } : {};
+  const go = async (url: string): Promise<void> => {
+    await ctx.call('browser.navigate', { url, ...tabArg }, { timeoutMs: NAVIGATE_TIMEOUT_MS });
+  };
+  const fail = (message: string, list: Array<Record<string, string>> = []): CollectionRun => ({
+    ok: false,
+    list,
+    details: [],
+    error: message,
+    ms: Date.now() - started,
+  });
+
+  try {
+    await go(collection.url);
+  } catch (err) {
+    return fail(zhError(err instanceof Error ? err.message : String(err)));
+  }
+  if (collection.list.scope) {
+    await waitForSelector(ctx, tid, collection.list.scope);
+  }
+  let list: Array<Record<string, string>> = [];
+  try {
+    const raw = await collectEvaluate(
+      ctx,
+      tid,
+      collectExpression(collection.list.scope, collection.list.fields, collection.list.limit),
+    );
+    list = Array.isArray(raw) ? (raw as Array<Record<string, string>>) : [];
+  } catch (err) {
+    return fail(`读取列表失败：${describe(err)}`);
+  }
+  if (list.length === 0) {
+    return fail('列表一条也没取到：选择器可能已经失效');
+  }
+
+  const details: Array<{ url: string; fields: Record<string, string> }> = [];
+  if (collection.detail) {
+    const urls = list
+      .map((row) => row[collection.detail!.urlField] ?? '')
+      .filter((url) => /^https?:\/\//i.test(url))
+      .slice(0, collection.detail.count);
+    for (const url of urls) {
+      try {
+        await go(url);
+        if (collection.detail.waitFor) {
+          await waitForSelector(ctx, tid, collection.detail.waitFor);
+        }
+        const raw = await collectEvaluate(
+          ctx,
+          tid,
+          collectExpression('', collection.detail.fields, 1),
+        );
+        const rec = Array.isArray(raw) ? (raw[0] as Record<string, string>) : undefined;
+        details.push({ url, fields: rec && typeof rec === 'object' ? rec : {} });
+      } catch (err) {
+        details.push({ url, fields: { error: describe(err) } });
+      }
+    }
+    // Leave the user looking at the list, not the last detail page.
+    try {
+      await go(collection.url);
+    } catch {
+      /* the report below is enough */
+    }
+  }
+  return { ok: true, list, details, ms: Date.now() - started };
+}
+
 /** Human-readable form of a step target: alt(a || b || c) → a（备选 b / c）. */
 function prettyTarget(target: string): string {
   const m = /^alt\(([\s\S]*)\)$/.exec(target);
@@ -1193,6 +2088,11 @@ function prettyStepLine(line: string, target: string): string {
 
 function recipeSignature(steps: RecipeStep[]): string {
   return steps.map((s) => `${s.kind}:${s.target}`).join('|');
+}
+
+/** Full shape, for deciding whether an edit actually changed anything. */
+function recipeStepsKey(steps: RecipeStep[]): string {
+  return JSON.stringify(steps.map((s) => [s.kind, s.target, s.value ?? '', s.expect ?? '']));
 }
 
 /** Recipes still worth offering: two consecutive failures retires one. */
@@ -1510,28 +2410,172 @@ async function save(ctx: PluginContext, key: string, value: unknown, what: strin
 }
 
 async function loadState(ctx: PluginContext): Promise<void> {
-  const [h, f, c, s, r] = await Promise.all([
+  const [h, f, c, s, r, n, rn, w, col] = await Promise.all([
     readKey(ctx, HISTORY_KEY),
     readKey(ctx, FAVORITES_KEY),
     readKey(ctx, CLIPS_KEY),
     readKey(ctx, SETTINGS_KEY),
     readKey(ctx, RECIPES_KEY),
+    readKey(ctx, SITE_NOTES_KEY),
+    readKey(ctx, SITE_RUNS_KEY),
+    readKey(ctx, WORKFLOWS_KEY),
+    readKey(ctx, COLLECTIONS_KEY),
   ]);
   if (Array.isArray(h)) history = h as HistoryEntry[];
   if (Array.isArray(f)) favorites = f as Favorite[];
   if (Array.isArray(r)) {
     // Rows written before site/paths existed still load: fill them in.
-    recipes = (r as Recipe[]).map((x) => ({
-      ...x,
-      // Old auto-names carried the step count; display adds it, so strip it.
-      name: String(x.name ?? '').replace(/（\d+ 步）\s*$/, ''),
-      site: x.site || siteOf(x.origin),
-      paths: Array.isArray(x.paths) ? x.paths : [],
-      uses: x.uses ?? 0,
-      failures: x.failures ?? 0,
-    }));
+    recipes = (r as Recipe[]).map((x) => {
+      const revisions = Array.isArray(x.revisions)
+        ? x.revisions
+            .filter((v) => v && Array.isArray(v.steps))
+            .map((v) => ({
+              at: Number(v.at) || Date.now(),
+              by: v.by === 'agent' ? ('agent' as const) : ('user' as const),
+              name: String(v.name ?? ''),
+              steps: v.steps,
+            }))
+            .slice(-NOTE_REVISIONS_MAX)
+        : [];
+      return {
+        ...x,
+        // Old auto-names carried the step count; display adds it, so strip it.
+        name: String(x.name ?? '').replace(/（\d+ 步）\s*$/, ''),
+        site: x.site || siteOf(x.origin),
+        paths: Array.isArray(x.paths) ? x.paths : [],
+        uses: x.uses ?? 0,
+        failures: x.failures ?? 0,
+        ...(revisions.length ? { revisions } : {}),
+      };
+    });
   }
   if (Array.isArray(c)) clips = c as Clip[];
+  if (Array.isArray(n)) {
+    // Rows written by an earlier build may miss derived fields; fill them so a
+    // half-written file never takes the whole memory list down.
+    siteNotes = (n as SiteNote[])
+      .map((x) => {
+        const revisions = Array.isArray(x.revisions)
+          ? x.revisions
+              .filter((v) => v && typeof v.text === 'string')
+              .map((v) => ({
+                at: Number(v.at) || Date.now(),
+                by: v.by === 'agent' ? ('agent' as const) : ('user' as const),
+                text: String(v.text),
+                verified: v.verified !== false,
+                enabled: v.enabled !== false,
+              }))
+              .slice(-NOTE_REVISIONS_MAX)
+          : [];
+        const suspect =
+          x.suspect && typeof x.suspect.reason === 'string'
+            ? {
+                at: Number(x.suspect.at) || Date.now(),
+                reason: String(x.suspect.reason),
+                url: String(x.suspect.url ?? ''),
+              }
+            : undefined;
+        return {
+          id: String(x.id ?? ''),
+          origin: String(x.origin ?? ''),
+          site: String(x.site ?? '') || siteOf(String(x.origin ?? '')),
+          text: String(x.text ?? ''),
+          by: x.by === 'agent' ? ('agent' as const) : ('user' as const),
+          // Rows from the first build had no `verified`: a user's writing counts
+          // as confirmed; an agent's does not unless it was already marked.
+          verified: typeof x.verified === 'boolean' ? x.verified : x.by !== 'agent',
+          createdAt: Number(x.createdAt) || Date.now(),
+          updatedAt: Number(x.updatedAt) || Number(x.createdAt) || Date.now(),
+          enabled: x.enabled !== false,
+          ...(suspect ? { suspect } : {}),
+          ...(revisions.length ? { revisions } : {}),
+        };
+      })
+      .filter((x) => x.id && x.origin && x.text);
+  }
+  if (Array.isArray(rn)) {
+    runLog = (rn as RunRecord[])
+      .filter((x) => x && x.id && x.origin)
+      .map((x) => ({
+        id: String(x.id),
+        at: Number(x.at) || Date.now(),
+        origin: String(x.origin),
+        ok: x.ok === true,
+        steps: Number(x.steps) || 0,
+        failedStep: Number(x.failedStep) || 0,
+        error: typeof x.error === 'string' ? x.error.slice(0, 500) : undefined,
+        recipeName: typeof x.recipeName === 'string' ? x.recipeName : undefined,
+        injected: Array.isArray(x.injected) ? x.injected.map(String).slice(0, 20) : [],
+      }))
+      .slice(0, SITE_RUNS_MAX);
+  }
+  if (Array.isArray(w)) {
+    workflows = (w as Workflow[])
+      .filter((x) => x && x.id && x.name)
+      .map((x) => ({
+        id: String(x.id),
+        name: String(x.name).slice(0, 80),
+        steps: normalizeWorkflowSteps(x.steps),
+        createdBy: x.createdBy === 'agent' ? ('agent' as const) : ('user' as const),
+        createdAt: Number(x.createdAt) || Date.now(),
+        updatedAt: Number(x.updatedAt) || Date.now(),
+        uses: Number(x.uses) || 0,
+        ...(Number(x.lastOk) ? { lastOk: Number(x.lastOk) } : {}),
+        ...(x.lastError && typeof x.lastError.message === 'string'
+          ? {
+              lastError: {
+                at: Number(x.lastError.at) || Date.now(),
+                message: String(x.lastError.message).slice(0, 300),
+              },
+            }
+          : {}),
+        ...(Array.isArray(x.revisions) ? { revisions: normalizeWorkflowRevisions(x.revisions) } : {}),
+      }))
+      .filter((x) => x.steps.length > 0)
+      .slice(0, WORKFLOWS_MAX);
+  }
+  if (Array.isArray(col)) {
+    collections = (col as Collection[])
+      .filter((x) => x && x.id && x.name && x.url)
+      .map((x) => ({
+        id: String(x.id),
+        origin: String(x.origin) || originOfUrl(String(x.url)),
+        site: String(x.site) || siteOf(String(x.url)),
+        name: String(x.name).slice(0, 80),
+        url: String(x.url),
+        list: {
+          scope: String(x.list?.scope ?? ''),
+          fields: normalizeCollectFields(x.list?.fields),
+          limit: Math.min(COLLECT_ROWS_MAX, Math.max(1, Number(x.list?.limit) || 20)),
+        },
+        ...(x.detail && typeof x.detail.urlField === 'string'
+          ? {
+              detail: {
+                urlField: String(x.detail.urlField),
+                fields: normalizeCollectFields(x.detail.fields),
+                ...(x.detail.waitFor ? { waitFor: String(x.detail.waitFor) } : {}),
+                count: Math.min(COLLECT_DETAIL_MAX, Math.max(1, Number(x.detail.count) || 3)),
+              },
+            }
+          : {}),
+        createdBy: x.createdBy === 'agent' ? ('agent' as const) : ('user' as const),
+        createdAt: Number(x.createdAt) || Date.now(),
+        updatedAt: Number(x.updatedAt) || Date.now(),
+        uses: Number(x.uses) || 0,
+        ...(Number(x.lastOk) ? { lastOk: Number(x.lastOk) } : {}),
+        failures: Number(x.failures) || 0,
+        ...(x.lastError && typeof x.lastError.message === 'string'
+          ? {
+              lastError: {
+                at: Number(x.lastError.at) || Date.now(),
+                message: String(x.lastError.message).slice(0, 300),
+              },
+            }
+          : {}),
+      }))
+      .filter((x) => x.list.fields.length > 0)
+      .slice(0, COLLECTIONS_MAX);
+  }
   const settings = s as { private?: boolean; selPopup?: boolean } | undefined;
   privateMode = Boolean(settings?.private);
   // On unless the user turned it off — an absent key is a first run, not a "no".
@@ -2441,6 +3485,8 @@ plugin({
         const id = String(params.id ?? '');
         const target = recipes.find((r) => r.id === id);
         if (!target) return { ok: false, error: 'recipe not found' };
+        const beforeName = target.name;
+        const beforeSteps = target.steps.map((s) => ({ ...s }));
         const name = String(params.name ?? '').trim();
         if (name) target.name = name.slice(0, 40);
         if (Array.isArray(params.steps)) {
@@ -2458,8 +3504,36 @@ plugin({
           target.steps = cleaned;
           target.params = cleaned.filter((x) => x.kind === 'fill' || x.kind === 'select').length;
         }
+        // Keep the previous version whenever the edit actually changed the
+        // recipe — the user is fixing selectors by hand, and hand fixes are
+        // exactly what people need to be able to undo.
+        if (beforeName !== target.name || recipeStepsKey(beforeSteps) !== recipeStepsKey(target.steps)) {
+          target.revisions = [
+            ...(target.revisions ?? []),
+            { at: Date.now(), by: 'user' as const, name: beforeName, steps: beforeSteps },
+          ].slice(-NOTE_REVISIONS_MAX);
+        }
         // An edited recipe is a deliberate reset: it has not failed yet, and
         // the failure it was carrying is about targets that no longer exist.
+        target.failures = 0;
+        delete target.lastError;
+        await save(ctx, RECIPES_KEY, recipes, 'recipes');
+        broadcast(ctx, 'ui.recipesChanged', { recipes });
+        return { ok: true };
+      }
+      case 'recipes.restore': {
+        const target = recipes.find((r) => r.id === String(params.id ?? ''));
+        if (!target) return { ok: false, error: 'recipe not found' };
+        const at = Number(params.at) || 0;
+        const revision = (target.revisions ?? []).find((r) => r.at === at);
+        if (!revision) return { ok: false, error: 'revision not found' };
+        target.revisions = [
+          ...(target.revisions ?? []),
+          { at: Date.now(), by: 'user' as const, name: target.name, steps: target.steps.map((s) => ({ ...s })) },
+        ].slice(-NOTE_REVISIONS_MAX);
+        target.name = revision.name;
+        target.steps = revision.steps.map((s) => ({ ...s }));
+        target.params = target.steps.filter((x) => x.kind === 'fill' || x.kind === 'select').length;
         target.failures = 0;
         delete target.lastError;
         await save(ctx, RECIPES_KEY, recipes, 'recipes');
@@ -2603,6 +3677,18 @@ plugin({
           favorited = true;
         }
         await save(ctx, FAVORITES_KEY, favorites, 'favorites');
+        // Unfavoriting ends the long-term relationship: the user's notes stay
+        // (they are authored writing), but the operational ledger goes — it
+        // exists to explain this site's runs, and there are no more of them.
+        if (!favorited) {
+          const origin = originOfUrl(url);
+          const before = runLog.length;
+          runLog = runLog.filter((r) => r.origin !== origin);
+          if (runLog.length !== before) {
+            await save(ctx, SITE_RUNS_KEY, runLog, 'site runs');
+            broadcast(ctx, 'ui.siteRunsChanged', { origin });
+          }
+        }
         // Two panels can be open on the same engine; both stars follow.
         broadcast(ctx, 'ui.favoritesChanged', { favorites });
         if (url === urlKey(lastUrl)) pushUrl(ctx, lastUrl);
@@ -2615,6 +3701,139 @@ plugin({
         await save(ctx, FAVORITES_KEY, favorites, 'favorites');
         broadcast(ctx, 'ui.favoritesChanged', { favorites });
         if (url === urlKey(lastUrl)) pushUrl(ctx, lastUrl);
+        return { ok: true };
+      }
+      case 'siteMemory.list': {
+        // The panel asks for the page it shows; '' (a new tab) means nothing
+        // to list rather than "whatever was last navigated".
+        const url = String(params.url ?? lastUrl ?? '');
+        const origin = originOfUrl(url);
+        return {
+          notes: notesFor(origin),
+          site: siteOf(url),
+          origin,
+          favorited: isFavoriteOrigin(origin),
+        };
+      }
+      case 'siteMemory.add': {
+        const url = String(params.url ?? lastUrl ?? '');
+        const note = await addSiteNote(ctx, url, String(params.text ?? ''), 'user');
+        return { ok: true, note };
+      }
+      case 'siteMemory.update': {
+        const note = await updateSiteNote(
+          ctx,
+          String(params.id ?? ''),
+          {
+            text: params.text,
+            enabled: params.enabled,
+            // The panel is the user's hand: it may confirm a pending note.
+            verified: params.verified,
+          },
+          'user',
+        );
+        return { ok: true, note };
+      }
+      case 'siteMemory.remove': {
+        await removeSiteNote(ctx, String(params.id ?? ''));
+        return { ok: true };
+      }
+      case 'siteMemory.resolve': {
+        const note = await resolveSiteNote(ctx, String(params.id ?? ''));
+        return { ok: true, note };
+      }
+      case 'siteMemory.restore': {
+        const note = await restoreSiteNote(
+          ctx,
+          String(params.id ?? ''),
+          Number(params.at) || 0,
+        );
+        return { ok: true, note };
+      }
+      case 'siteMemory.runs': {
+        const url = String(params.url ?? lastUrl ?? '');
+        const origin = originOfUrl(url);
+        return {
+          runs: runLog.filter((r) => r.origin === origin).slice(0, 20),
+          origin,
+        };
+      }
+      // ── Workflows: global, across sites ──
+      case 'workflows.list': {
+        return { workflows };
+      }
+      case 'workflows.add': {
+        const workflow = await addWorkflow(
+          ctx,
+          String(params.name ?? ''),
+          normalizeWorkflowSteps(params.steps),
+          'user',
+        );
+        return { ok: true, workflow };
+      }
+      case 'workflows.update': {
+        const workflow = await updateWorkflow(
+          ctx,
+          String(params.id ?? ''),
+          {
+            ...(typeof params.name === 'string' ? { name: params.name } : {}),
+            ...(params.steps !== undefined ? { steps: normalizeWorkflowSteps(params.steps) } : {}),
+          },
+          'user',
+        );
+        return { ok: true, workflow };
+      }
+      case 'workflows.remove': {
+        await removeWorkflow(ctx, String(params.id ?? ''));
+        return { ok: true };
+      }
+      case 'workflows.restore': {
+        const workflow = await restoreWorkflow(
+          ctx,
+          String(params.id ?? ''),
+          Number(params.at) || 0,
+        );
+        return { ok: true, workflow };
+      }
+      /** Everything the memory center shows, in one round trip. */
+      case 'memory.overview': {
+        const origins = new Set<string>();
+        for (const f of favorites) origins.add(originOfUrl(f.url));
+        for (const n of siteNotes) origins.add(n.origin);
+        const sites = [...origins]
+          .filter(Boolean)
+          .map((origin) => ({
+            origin,
+            site: siteOf(origin),
+            favorited: isFavoriteOrigin(origin),
+            notes: notesFor(origin),
+            runs: runLog.filter((r) => r.origin === origin).slice(0, 10),
+            collections: collections.filter((c) => c.site === siteOf(origin)),
+          }))
+          .sort(
+            (a, b) => Number(b.favorited) - Number(a.favorited) || a.site.localeCompare(b.site),
+          );
+        return { sites, workflows, generatedAt: Date.now() };
+      }
+      // ── Collections: deterministic reads ──
+      case 'collections.list': {
+        const url = String(params.url ?? lastUrl ?? '');
+        const currentSite = siteOf(url);
+        const found = collections
+          .filter((c) => !currentSite || c.site === currentSite)
+          .sort((a, b) => (b.lastOk ?? 0) - (a.lastOk ?? 0));
+        return { collections: found, site: currentSite };
+      }
+      case 'collections.run': {
+        const collection = collectionById(String(params.id ?? ''));
+        if (!collection) return { ok: false, error: '采集配方已经不在了' };
+        const tabId = targetTabId(key) ?? (await ensureTab(ctx, key)).id;
+        const result = await runCollection(ctx, collection, tabId);
+        await recordCollectionRun(ctx, collection, result.ok, result.error ?? '');
+        return { ...result, collection };
+      }
+      case 'collections.remove': {
+        await removeCollection(ctx, String(params.id ?? ''));
         return { ok: true };
       }
       case 'history.clear':
@@ -2650,7 +3869,11 @@ plugin({
           `unknown panel method: ${method} (known: nav.open, nav.back, nav.forward, nav.reload, ` +
             `state.get, omnibox.search, favorites.toggle, favorites.remove, history.clear, ` +
             `sel.theme, settings.setPrivate, settings.setSelPopup, tabs.new, tabs.activate, tabs.close, ` +
-            `tabs.reorder, split.set, recipes.list, recipes.update, recipes.delete, recipes.run)`,
+            `tabs.reorder, split.set, recipes.list, recipes.update, recipes.delete, recipes.run, ` +
+            `siteMemory.list, siteMemory.add, siteMemory.update, siteMemory.remove, ` +
+            `siteMemory.resolve, siteMemory.restore, siteMemory.runs, recipes.restore, ` +
+            `workflows.list, workflows.add, workflows.update, workflows.remove, workflows.restore, ` +
+            `collections.list, collections.run, collections.remove, memory.overview)`,
         );
     }
   },
@@ -2773,6 +3996,10 @@ plugin({
   },
 
   async onTool(name, params, ctx, call) {
+    // A tool can run before the panel has ever asked for anything (a fresh
+    // process, an agent-only conversation). Storage-backed tools must not see
+    // an empty world in that window.
+    await ensureLoaded(ctx);
     // The conversation this call belongs to — its focused tab is the target.
     const sessionKey = call?.sessionId ?? null;
     const tid = targetTabId(sessionKey, params.tab);
@@ -2823,6 +4050,10 @@ plugin({
           throw new Error(zhError(error instanceof Error ? error.message : String(error)));
         }
         const finalUrl = result?.url ?? url;
+        // The tool's "current page" default must follow the navigation even
+        // before the host's urlChanged event arrives (a headless/agent-only
+        // run has no panel listening).
+        lastUrl = finalUrl;
         // Keep the mirror row in step (the urlChanged event does it too, but
         // the direct answer is here now).
         const row = bucketFor(bucketKey(sessionKey)).tabs.find((t) => t.id === tab.id);
@@ -2837,23 +4068,48 @@ plugin({
             ? `\n\n（页面到 ${(result.slowMs / 1000).toFixed(1)}s 才就绪，网络偏慢，但内容已经加载，可以直接继续操作。）`
             : '';
         const head = `已打开 ${finalUrl}${result?.title ? ` — ${result.title}` : ''}${slowNote}`;
+        // Long-term knowledge the user wrote for this site. Only favorited
+        // origins inject, and it is placed last so it is the freshest thing
+        // in context when the agent starts working.
+        const memo = siteMemoryDigest(originOfUrl(finalUrl));
+        const injectKey = `${sessionKey ?? ''}|${originOfUrl(finalUrl)}`;
+        if (memo.ids.length) {
+          // What this navigation put in front of the agent — the ledger ties a
+          // later failure back to exactly these notes.
+          lastInjected.set(injectKey, { ids: memo.ids, at: Date.now() });
+        } else {
+          // An empty navigation must not inherit an older page's context.
+          lastInjected.delete(injectKey);
+        }
+        const compose = (body: string): string => {
+          const parts = [head];
+          if (body) parts.push(body);
+          if (memo.text) parts.push(memo.text);
+          return parts.join('\n\n');
+        };
         if (result?.page?.authKind === 'captcha') {
-          return `${head}\n\n⚠️ 这个页面需要人工完成人机验证。请在右侧浏览器面板里由用户完成；不要尝试点击或绕过。用户完成后再继续。`;
+          return compose(
+            '⚠️ 这个页面需要人工完成人机验证。请在右侧浏览器面板里由用户完成；不要尝试点击或绕过。用户完成后再继续。',
+          );
         }
         if (result?.page?.authKind === 'login') {
-          return `${head}\n\n⚠️ 这是一个登录页。登录必须由用户完成（账号密码、短信验证码、扫码都不是 agent 该做的）。请在右侧面板里由用户登录，完成后再继续。`;
+          return compose(
+            '⚠️ 这是一个登录页。登录必须由用户完成（账号密码、短信验证码、扫码都不是 agent 该做的）。请在右侧面板里由用户登录，完成后再继续。',
+          );
         }
         const here = pathOf(finalUrl);
         const nearby = liveRecipes(originOfUrl(finalUrl))
           .map((r) => ({ r, rank: pathRank(r, here) }))
           .sort((x, y) => x.rank - y.rank || y.r.lastOk - x.r.lastOk)
           .slice(0, 5);
-        if (nearby.length === 0) return head;
+        if (nearby.length === 0) return compose('');
         const where = (rank: number): string =>
           rank === 0 ? '，本页' : rank === 1 ? '，同栏目' : '';
-        return `${head}\n\n本站有 ${nearby.length} 个已记录的快捷操作：${nearby
-          .map(({ r, rank }) => `${r.name}（${r.steps.length} 步${where(rank)}）`)
-          .join('、')}。用 browser_recipes 查看步骤，再按 browser_act 执行；某一步的预期对不上就停下自己操作。`;
+        return compose(
+          `本站有 ${nearby.length} 个已记录的快捷操作：${nearby
+            .map(({ r, rank }) => `${r.name}（${r.steps.length} 步${where(rank)}）`)
+            .join('、')}。用 browser_recipes 查看步骤，再按 browser_act 执行；某一步的预期对不上就停下自己操作。`,
+        );
       }
 
       case 'browser_tab_list': {
@@ -3052,6 +4308,23 @@ plugin({
             creditedId,
           );
         }
+        // The failure ledger: what ran, what broke, and which memory was in
+        // front of the agent when it did. The ids are context for a person,
+        // not a verdict — a run can fail for reasons unrelated to memory.
+        const runOrigin = originOfUrl(state?.url ?? '');
+        const injection = lastInjected.get(`${sessionKey ?? ''}|${runOrigin}`);
+        const injectedIds =
+          injection && Date.now() - injection.at < INJECTION_TTL_MS ? injection.ids : [];
+        await recordRun(ctx, {
+          at: Date.now(),
+          origin: runOrigin,
+          ok: failedAt < 0,
+          steps: steps.length,
+          failedStep: failedAt < 0 ? 0 : failedAt + 1,
+          ...(failedAt >= 0 ? { error: failMsg } : {}),
+          ...(recipeName ? { recipeName } : {}),
+          injected: injectedIds,
+        });
         const head =
           failedAt < 0
             ? `已完成 ${steps.length} 步`
@@ -3069,7 +4342,11 @@ plugin({
               : state.snapshot;
           lines.push('', '可交互元素:', snap);
         }
-        return lines.join('\n');
+        const hint =
+          failedAt < 0
+            ? memoryLearningHint(sessionKey, originOfUrl(state?.url ?? ''), steps.length)
+            : '';
+        return lines.join('\n') + hint;
       }
 
       case 'browser_click': {
@@ -3265,8 +4542,259 @@ plugin({
           return '用户还没有收藏任何网站(浏览器面板地址栏左边的星标按钮可以收藏)。';
         }
         return favorites
-          .map((f, i) => `${i + 1}. ${f.title || '(无标题)'}\n   ${f.url}`)
+          .map((f, i) => {
+            const count = liveNotes(originOfUrl(f.url)).length;
+            return `${i + 1}. ${f.title || '(无标题)'}\n   ${f.url}${count ? ` · 本站记忆 ${count} 条` : ''}`;
+          })
           .join('\n');
+      }
+
+      /**
+       * The user's own long-term writing about a site. This tool reads it, and
+       * writes ONLY on request ("记住……"): memory the model invents is
+       * worse than none, because it outlives the turn that invented it.
+       */
+      case 'browser_site_memory': {
+        const action = String(params.action ?? 'list').trim();
+        const rawUrl = String(params.url ?? '').trim();
+        const url = rawUrl ? normalizeUrl(rawUrl) : lastUrl;
+        const origin = originOfUrl(url);
+        if (!origin) throw new Error('还没有打开的网页：先 browser_navigate，或传 url');
+        const mine = notesFor(origin);
+        const site = siteOf(url) || origin;
+        const favorited = isFavoriteOrigin(origin);
+
+        if (action === 'list') {
+          if (mine.length === 0) {
+            return (
+              `用户还没有给 ${site} 写过本站记忆。` +
+              (favorited
+                ? '可以在浏览器面板地址栏下拉的「本站记忆」里写；他明确让你记时，也可以用 action:"add" 记一条。'
+                : '（本站未收藏，写了暂时也不会提供给你。）')
+            );
+          }
+          return (
+            `本站记忆 · ${site} · ${mine.length} 条` +
+            (favorited ? '（已收藏，导航到本站时会自动提供）' : '（本站未收藏，不会自动提供）') +
+            '\n' +
+            mine
+              .map((n, i) => {
+                const state = n.suspect
+                  ? '（可疑：AI 报告与页面不符，暂停提供）'
+                  : n.enabled === false
+                    ? '（已停用）'
+                    : n.verified === false
+                      ? '（待确认）'
+                      : '';
+                const by = n.by === 'agent' ? '（AI 记的）' : '';
+                return `${i + 1}. [${n.id}] ${n.text}${state}${by}`;
+              })
+              .join('\n') +
+            '\n\n这些是用户沉淀的长期知识，不是页面实时状态；与页面不符时以页面为准，用 dispute 报告哪条不对（它会被标为可疑、暂停提供）。' +
+            (mine.some((n) => n.verified === false)
+              ? '标着「待确认」的是你自己观察到、用户还没确认的，引用时要说明。'
+              : '')
+          );
+        }
+        if (action === 'add') {
+          const note = await addSiteNote(ctx, url, String(params.text ?? ''), 'agent');
+          return (
+            `已记为待确认（${site}，第 ${mine.length + 1} 条）：${note.text}` +
+            (favorited
+              ? '。下次进入本站会带上，但标注为未确认；用户在面板里确认后才转正。'
+              : '。本站还没被收藏，收藏后才会带上。')
+          );
+        }
+        if (action === 'update') {
+          const id = String(params.id ?? '').trim();
+          const target = mine.find((n) => n.id === id);
+          if (!target) throw new Error(`本站没有这条记忆：${id || '（缺 id）'}`);
+          if (target.verified !== false) {
+            throw new Error(
+              '这条记忆用户已经确认过，只有用户自己能改；要修订就用 add 记一条新的候选，并在回复里说明',
+            );
+          }
+          if (target.suspect) throw new Error('这条记忆已被标为可疑，等用户在面板里处理');
+          const note = await updateSiteNote(
+            ctx,
+            id,
+            { text: params.text, enabled: params.enabled },
+            'agent',
+          );
+          return `已更新记忆 [${note.id}]：${note.text}${note.enabled === false ? '（已停用）' : ''}`;
+        }
+        if (action === 'dispute') {
+          const id = String(params.id ?? '').trim();
+          const target = mine.find((n) => n.id === id);
+          if (!target) throw new Error(`本站没有这条记忆：${id || '（缺 id）'}`);
+          const note = await disputeSiteNote(ctx, id, String(params.reason ?? ''), url);
+          return (
+            `已把这条记忆标为可疑、暂停提供：${note.text}\n原因：${note.suspect?.reason}\n` +
+            '用户会在面板里确认或修正；现在请按页面实际情况自己操作，并在回复里说明。'
+          );
+        }
+        if (action === 'remove') {
+          const id = String(params.id ?? '').trim();
+          const target = mine.find((n) => n.id === id);
+          if (!target) throw new Error(`本站没有这条记忆：${id || '（缺 id）'}`);
+          if (target.verified !== false) {
+            throw new Error('这条记忆用户已经确认过，只有用户自己能删');
+          }
+          const note = await removeSiteNote(ctx, id);
+          return `已删除这条记忆：${note.text}`;
+        }
+        throw new Error(`未知 action：${action}（list / add / update / dispute / remove）`);
+      }
+
+      /**
+       * Cross-site routines the user repeats. A workflow is a readable
+       * checklist pointing at sites and recipes — the agent still drives each
+       * step, so nothing here can bypass a login or a confirmation gate.
+       */
+      case 'browser_workflow': {
+        const action = String(params.action ?? 'list').trim();
+        if (action === 'list') {
+          if (workflows.length === 0) {
+            return '还没有保存任何跨网站工作流。用户说「记住这套流程」时，可以用 add 把步骤记下来（每步一句话，注明网站/配方）。';
+          }
+          return (
+            workflows
+              .map((w, i) => {
+                const lines = w.steps.map(
+                  (s, j) =>
+                    `  ${j + 1}. ${s.site ? `[${s.site}] ` : ''}${s.text}${s.recipe ? `（用配方「${s.recipe}」）` : ''}`,
+                );
+                const meta =
+                  `用过 ${w.uses} 次` +
+                  (w.lastOk ? `，上次成功 ${formatWhen(w.lastOk)}` : '') +
+                  (w.lastError ? `；上次失败 ${formatWhen(w.lastError.at)}：${w.lastError.message}` : '');
+                return `${i + 1}. [${w.id}] ${w.name}（${w.steps.length} 步 · ${meta}）\n${lines.join('\n')}`;
+              })
+              .join('\n\n') +
+            '\n\n按顺序执行，每一步用对应网站的配方或 browser_act；做完用 action:"mark" 报告结果（ok、error）。' +
+            '工作流只是清单，真正操作仍走正常工具——登录、验证码、确认框仍然交给用户。'
+          );
+        }
+        if (action === 'add') {
+          const workflow = await addWorkflow(
+            ctx,
+            String(params.name ?? ''),
+            normalizeWorkflowSteps(params.steps),
+            'agent',
+          );
+          return `已保存工作流「${workflow.name}」（${workflow.steps.length} 步）。用户可以在记忆中心里核对和修改。`;
+        }
+        if (action === 'update') {
+          const workflow = await updateWorkflow(
+            ctx,
+            String(params.id ?? ''),
+            {
+              ...(typeof params.name === 'string' ? { name: params.name } : {}),
+              ...(params.steps !== undefined ? { steps: normalizeWorkflowSteps(params.steps) } : {}),
+            },
+            'agent',
+          );
+          return `已更新工作流「${workflow.name}」。`;
+        }
+        if (action === 'remove') {
+          const workflow = await removeWorkflow(ctx, String(params.id ?? ''));
+          return `已删除工作流「${workflow.name}」。`;
+        }
+        if (action === 'mark') {
+          const workflow = await markWorkflow(
+            ctx,
+            String(params.id ?? ''),
+            params.ok === true,
+            String(params.error ?? ''),
+          );
+          return `已记录：工作流「${workflow.name}」${params.ok === true ? '成功' : '失败'}（第 ${workflow.uses} 次使用）。`;
+        }
+        throw new Error(`未知 action：${action}（list / add / update / remove / mark）`);
+      }
+
+      /**
+       * Deterministic reading recipes. A collection stores where to look, not
+       * what was there: every run reads the page fresh and returns only the
+       * named fields, so no page snapshot ever reaches the model.
+       */
+      case 'browser_collect': {
+        const action = String(params.action ?? 'list').trim();
+        const by: 'user' | 'agent' = 'agent';
+        if (action === 'list') {
+          if (collections.length === 0) {
+            return '还没有采集配方。先浏览页面、用 browser_evaluate 验证选择器，再把「打开哪个页面、取哪些字段」用 add 记下来。';
+          }
+          return (
+            collections
+              .map((c, i) => {
+                const fields = c.list.fields.map((f) => f.key).join(' / ');
+                const detailFields = c.detail
+                  ? `，进前 ${c.detail.count} 条取 ${c.detail.fields.map((f) => f.key).join(' / ')}`
+                  : '';
+                const status =
+                  c.failures >= 2
+                    ? ' [已失效]'
+                    : c.lastError
+                      ? ` [上次失败：${c.lastError.message}]`
+                      : c.lastOk
+                        ? ` [上次成功 ${formatWhen(c.lastOk)}]`
+                        : '';
+                return `${i + 1}. [${c.id}] ${c.name}（${c.site} · 列表取 ${fields}${detailFields} · 用过 ${c.uses} 次）${status}\n   ${c.url}`;
+              })
+              .join('\n') +
+            '\n\n用 action:"run" 和 id 运行：它在浏览器里真实导航并只返回这些字段，不产生页面快照。' +
+            '读规则：列表字段取不到就停下检查选择器；连续失败两次会标为失效。'
+          );
+        }
+        if (action === 'add') {
+          const collection = await addCollection(ctx, params, by);
+          return (
+            `已保存采集配方「${collection.name}」（${collection.site}）：列表 ${collection.list.fields
+              .map((f) => f.key)
+              .join(' / ')}${collection.detail ? `，进前 ${collection.detail.count} 条取 ${collection.detail.fields.map((f) => f.key).join(' / ')}` : ''}。\n` +
+            `立刻用 action:"run" id:"${collection.id}" 跑一次验证；取不到数据就 update 选择器，不要留着坏配方。` +
+            '用户可以在浏览器地址栏下拉的「采集」里一键运行和删除。'
+          );
+        }
+        if (action === 'update') {
+          const collection = await updateCollection(ctx, String(params.id ?? ''), params);
+          return `已更新采集配方「${collection.name}」。建议再 run 一次验证。`;
+        }
+        if (action === 'remove') {
+          const collection = await removeCollection(ctx, String(params.id ?? ''));
+          return `已删除采集配方「${collection.name}」。`;
+        }
+        if (action === 'run') {
+          const collection = collectionById(String(params.id ?? ''));
+          if (!collection) throw new Error('没有找到这个采集配方');
+          const tab = tid ? { id: tid } : await ensureTab(ctx, bucketKey(sessionKey));
+          const result = await runCollection(ctx, collection, tab.id);
+          await recordCollectionRun(ctx, collection, result.ok, result.error ?? '');
+          if (!result.ok) {
+            return `采集「${collection.name}」失败：${result.error}\n检查一下页面结构是否变了；必要时用 update 修选择器，或者删掉这条。`;
+          }
+          const lines = [
+            `采集「${collection.name}」：${result.list.length} 条，${(result.ms / 1000).toFixed(1)}s（只返回字段，没有页面快照）`,
+          ];
+          result.list.slice(0, 30).forEach((row, i) => {
+            const line = Object.entries(row)
+              .map(([k, v]) => (v ? `${k}: ${String(v).slice(0, 200)}` : ''))
+              .filter(Boolean)
+              .join(' · ');
+            lines.push(`${i + 1}. ${line}`);
+          });
+          if (result.details.length) {
+            lines.push('', '详情：');
+            for (const d of result.details) {
+              lines.push(`- ${d.url}`);
+              for (const [k, v] of Object.entries(d.fields)) {
+                lines.push(`  ${k}: ${String(v).slice(0, 300)}`);
+              }
+            }
+          }
+          return lines.join('\n').slice(0, 12_000);
+        }
+        throw new Error(`未知 action：${action}（list / add / update / remove / run）`);
       }
 
       /**

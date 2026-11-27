@@ -1,0 +1,800 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>记忆中心</title>
+    <style>
+      :root {
+        --bg: hsl(var(--background, 222 19% 7%));
+        --card: hsl(var(--card, 222 15% 11%));
+        --fg: hsl(var(--foreground, 220 21% 92%));
+        --muted: hsl(var(--muted-foreground, 217 9% 59%));
+        --border: hsl(var(--border, 218 14% 20%));
+        --accent: hsl(var(--accent, 221 19% 17%));
+        --ring: hsl(var(--ring, 218 100% 65%));
+        --danger: hsl(var(--destructive, 0 70% 62%));
+        --ok: hsl(145 45% 55%);
+      }
+      * { box-sizing: border-box; }
+      html, body { height: 100%; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--fg);
+        font: 12px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif;
+        display: flex;
+        flex-direction: column;
+      }
+      header {
+        flex: none;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 14px;
+        border-bottom: 1px solid var(--border);
+      }
+      header h1 { font-size: 13px; font-weight: 600; margin: 0; flex: none; }
+      header .spacer { flex: 1; }
+      input, button, textarea { font: inherit; color: inherit; }
+      input[type='text'], input[type='search'], textarea {
+        background: transparent;
+        border: 1px solid var(--border);
+        border-radius: 5px;
+        padding: 4px 7px;
+        min-width: 0;
+      }
+      input:focus, textarea:focus { outline: 1px solid var(--ring); border-color: transparent; }
+      button {
+        background: transparent;
+        border: 1px solid var(--border);
+        border-radius: 5px;
+        padding: 3px 10px;
+        cursor: pointer;
+      }
+      button:hover { background: var(--accent); }
+      button.primary { border-color: var(--ring); }
+      button.ghost { border-color: transparent; }
+      button.danger { color: var(--danger); }
+      button:disabled { opacity: 0.5; cursor: default; }
+      #search { flex: 1; max-width: 340px; }
+      main { flex: 1; min-height: 0; display: flex; }
+      aside {
+        flex: none;
+        width: 230px;
+        border-right: 1px solid var(--border);
+        overflow-y: auto;
+        padding-bottom: 20px;
+      }
+      .sec {
+        padding: 10px 14px 4px;
+        font-size: 10.5px;
+        letter-spacing: 0.02em;
+        color: var(--muted);
+        user-select: none;
+      }
+      .item {
+        display: block;
+        width: 100%;
+        text-align: left;
+        border: none;
+        border-radius: 0;
+        padding: 7px 14px;
+        background: transparent;
+        cursor: pointer;
+      }
+      .item:hover { background: var(--accent); }
+      .item.on { background: var(--accent); }
+      .item .t {
+        display: block;
+        font-size: 12.5px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .item .s {
+        display: block;
+        font-size: 10.5px;
+        color: var(--muted);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .item.dim .t { color: var(--muted); }
+      #detail { flex: 1; min-width: 0; overflow-y: auto; padding: 14px 18px 40px; }
+      .detail-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 2px; }
+      .detail-head h2 { font-size: 15px; font-weight: 600; margin: 0; }
+      .detail-head .badge { font-size: 10.5px; color: var(--muted); }
+      .detail-sub { color: var(--muted); font-size: 11px; margin-bottom: 14px; }
+      .group { margin: 16px 0 6px; font-size: 11px; color: var(--muted); }
+      .group.warn { color: var(--danger); }
+      .row { display: flex; align-items: flex-start; gap: 8px; padding: 7px 0; border-bottom: 1px solid hsl(var(--border, 218 14% 20%) / 0.45); }
+      .row:last-child { border-bottom: none; }
+      .row .main { flex: 1; min-width: 0; }
+      .row .text { font-size: 12.5px; word-break: break-word; }
+      .row .meta { font-size: 10.5px; color: var(--muted); word-break: break-word; }
+      .row .meta.bad { color: var(--danger); }
+      .row .acts { flex: none; display: flex; gap: 2px; }
+      .row .acts button { border: none; padding: 1px 6px; border-radius: 4px; color: var(--muted); }
+      .row .acts button:hover { background: var(--accent); color: var(--fg); }
+      .empty { color: var(--muted); padding: 18px 0; text-align: center; font-size: 12px; }
+      .banner {
+        padding: 7px 10px;
+        border-radius: 6px;
+        background: hsl(var(--destructive, 0 70% 50%) / 0.12);
+        color: var(--danger);
+        margin-bottom: 12px;
+        font-size: 11px;
+      }
+      .add { display: flex; gap: 6px; margin: 10px 0 4px; }
+      .add input { flex: 1; }
+      .run {
+        padding: 8px 10px;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        margin-bottom: 6px;
+      }
+      .run .where { color: var(--danger); font-size: 11.5px; }
+      .run .meta { color: var(--muted); font-size: 10.5px; }
+      .hist { margin: 6px 0 10px 16px; }
+      .hist-row { display: flex; align-items: center; gap: 8px; font-size: 11px; padding: 2px 0; }
+      .hist-row .when { flex: none; color: var(--muted); }
+      .hist-row .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+      .editbox { display: flex; gap: 6px; margin: 6px 0; }
+      .editbox input { flex: 1; }
+      .wf-editor { margin-top: 10px; }
+      .wf-editor .name { width: 100%; margin-bottom: 8px; }
+      #wf-name { width: 100%; margin-bottom: 8px; }
+      .wf-step { display: flex; gap: 6px; align-items: center; margin-bottom: 5px; }
+      .wf-step .site { width: 140px; flex: none; }
+      .wf-step .text { flex: 1; min-width: 0; }
+      .wf-step .recipe { width: 120px; flex: none; }
+      .wf-step .x { flex: none; border: none; color: var(--muted); padding: 1px 6px; }
+      .wf-actions { display: flex; gap: 8px; margin-top: 10px; }
+      .hint { color: var(--muted); font-size: 10.5px; margin: 4px 0 10px; }
+      .chip { display: inline-block; font-size: 10px; padding: 0 5px; border-radius: 4px; border: 1px solid var(--border); color: var(--muted); margin-left: 4px; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>记忆中心</h1>
+      <input id="search" type="search" placeholder="搜索站点、记忆或工作流…" autocomplete="off" spellcheck="false" />
+      <div class="spacer"></div>
+      <button id="refresh">刷新</button>
+    </header>
+    <main>
+      <aside id="side"></aside>
+      <section id="detail"></section>
+    </main>
+    <script>
+      (function () {
+        var state = {
+          overview: null,
+          sel: null,        // {kind:'site', origin} | {kind:'workflow', id} | {kind:'new'}
+          query: '',
+          editingNoteId: '',
+          noteEditDraft: '',
+          noteDraft: '',
+          historyNoteId: '',
+          wfDraft: null,     // {id?, name, steps:[{text,site,recipe}]}
+          wfHistoryId: '',
+          error: '',
+        };
+        var side = document.getElementById('side');
+        var detail = document.getElementById('detail');
+        var search = document.getElementById('search');
+        var refreshTimer = null;
+
+        function esc(s) {
+          return String(s == null ? '' : s)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
+
+        function whenLabel(ts) {
+          var d = new Date(ts || 0);
+          if (isNaN(d.getTime())) return '';
+          var now = new Date();
+          var sameDay = function (a, b) {
+            return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+          };
+          var hm = function (x) {
+            return ('0' + x.getHours()).slice(-2) + ':' + ('0' + x.getMinutes()).slice(-2);
+          };
+          if (sameDay(d, now)) return '今天 ' + hm(d);
+          var y = new Date(now); y.setDate(y.getDate() - 1);
+          if (sameDay(d, y)) return '昨天 ' + hm(d);
+          return (d.getMonth() + 1) + '月' + d.getDate() + '日';
+        }
+
+        function req(method, params) {
+          return window.piSDK.request(method, params || {});
+        }
+
+        function fail(err) {
+          state.error = (err && err.message) || String(err);
+          render();
+        }
+
+        function selectedSite() {
+          if (!state.sel || state.sel.kind !== 'site' || !state.overview) return null;
+          return state.overview.sites.filter(function (s) { return s.origin === state.sel.origin; })[0] || null;
+        }
+
+        function selectedWorkflow() {
+          if (!state.sel || state.sel.kind !== 'workflow' || !state.overview) return null;
+          return state.overview.workflows.filter(function (w) { return w.id === state.sel.id; })[0] || null;
+        }
+
+        function noteGroups(site) {
+          return {
+            suspect: site.notes.filter(function (n) { return !!n.suspect; }),
+            pending: site.notes.filter(function (n) { return !n.suspect && n.verified === false; }),
+            confirmed: site.notes.filter(function (n) { return !n.suspect && n.verified !== false; }),
+          };
+        }
+
+        function matches(text) {
+          var q = state.query.trim().toLowerCase();
+          if (!q) return true;
+          return String(text || '').toLowerCase().indexOf(q) !== -1;
+        }
+
+        function siteMatches(site) {
+          if (matches(site.site) || matches(site.origin)) return true;
+          return site.notes.some(function (n) { return matches(n.text); });
+        }
+
+        function workflowMatches(wf) {
+          if (matches(wf.name)) return true;
+          return wf.steps.some(function (s) { return matches(s.text) || matches(s.site) || matches(s.recipe); });
+        }
+
+        // ── list ──
+        function renderSide() {
+          if (!state.overview) {
+            side.innerHTML = '<div class="empty">加载中…</div>';
+            return;
+          }
+          var html = '';
+          var sites = state.overview.sites.filter(siteMatches);
+          html += '<div class="sec">网站 · ' + sites.length + '</div>';
+          if (!sites.length) html += '<div class="empty">没有匹配的网站</div>';
+          for (var i = 0; i < sites.length; i++) {
+            var s = sites[i];
+            var groups = noteGroups(s);
+            var bits = [];
+            if (s.notes.length) bits.push(s.notes.length + ' 条记忆');
+            if (groups.suspect.length) bits.push(groups.suspect.length + ' 可疑');
+            if (groups.pending.length) bits.push(groups.pending.length + ' 待确认');
+            var fails = s.runs.filter(function (r) { return !r.ok; }).length;
+            if (fails) bits.push(fails + ' 次失败');
+            if (!s.favorited) bits.push('未收藏');
+            var on = state.sel && state.sel.kind === 'site' && state.sel.origin === s.origin;
+            html +=
+              '<button class="item' + (on ? ' on' : '') + (s.favorited ? '' : ' dim') + '" data-site="' + esc(s.origin) + '">' +
+                '<span class="t">' + esc(s.site || s.origin) + '</span>' +
+                '<span class="s">' + (bits.length ? esc(bits.join(' · ')) : '还没有内容') + '</span>' +
+              '</button>';
+          }
+          var wfs = state.overview.workflows.filter(workflowMatches);
+          html += '<div class="sec">工作流 · ' + wfs.length + '</div>';
+          if (!wfs.length) html += '<div class="empty">没有匹配的工作流</div>';
+          for (var j = 0; j < wfs.length; j++) {
+            var w = wfs[j];
+            var onw = state.sel && state.sel.kind === 'workflow' && state.sel.id === w.id;
+            html +=
+              '<button class="item' + (onw ? ' on' : '') + '" data-wf="' + esc(w.id) + '">' +
+                '<span class="t">' + esc(w.name) + '</span>' +
+                '<span class="s">' + w.steps.length + ' 步 · 用过 ' + w.uses + ' 次' +
+                  (w.lastError ? ' · 上次失败' : '') + '</span>' +
+              '</button>';
+          }
+          html += '<button class="item" data-new-wf="1" style="color:hsl(var(--ring, 218 100% 65%))"><span class="t">＋ 新建工作流</span></button>';
+          side.innerHTML = html;
+        }
+
+        // ── site detail ──
+        function noteRow(n, kind) {
+          var id = esc(n.id);
+          var actions = '';
+          if (kind === 'suspect') {
+            actions = '<button data-mem-resolve="' + id + '" title="我核对过页面，这条仍然正确">✓</button>' +
+              '<button data-mem-del="' + id + '" title="删除">✕</button>';
+          } else if (kind === 'pending') {
+            actions = '<button data-mem-confirm="' + id + '" title="确认">✓</button>' +
+              '<button data-mem-del="' + id + '" title="丢弃">✕</button>';
+          } else {
+            actions = '<button data-mem-toggle="' + id + '" title="' + (n.enabled === false ? '启用' : '停用') + '">' +
+                (n.enabled === false ? '▶' : '⏸') + '</button>' +
+              '<button data-mem-history="' + id + '" title="修订历史">↺</button>' +
+              '<button data-mem-edit="' + id + '" title="编辑">✎</button>' +
+              '<button data-mem-del="' + id + '" title="删除">✕</button>';
+          }
+          if (state.editingNoteId === n.id) {
+            return '<div class="editbox" data-edit-id="' + id + '">' +
+              '<input class="edit-input" value="' + esc(state.noteEditDraft) + '">' +
+              '<button class="edit-save primary">保存</button><button class="edit-cancel">取消</button></div>';
+          }
+          var meta = kind === 'suspect'
+            ? 'AI 报告：' + esc(n.suspect.reason)
+            : kind === 'pending'
+              ? 'AI 观察 · 未确认'
+              : (n.by === 'agent' ? 'AI 记的' : '你记的') + (n.enabled === false ? ' · 已停用' : '');
+          var hist = '';
+          if (state.historyNoteId === n.id) {
+            var revs = (n.revisions || []).slice().reverse();
+            hist = '<div class="hist">';
+            if (!revs.length) hist += '<div class="meta">还没有历史记录</div>';
+            for (var r = 0; r < revs.length; r++) {
+              hist += '<div class="hist-row"><span class="when">' + esc(whenLabel(revs[r].at)) + '</span>' +
+                '<span class="t">' + esc(revs[r].text) + '</span>' +
+                '<button data-mem-restore="' + revs[r].at + '" data-note="' + id + '">恢复</button></div>';
+            }
+            hist += '<div class="meta"><button class="ghost hist-close">关闭历史</button></div></div>';
+          }
+          return '<div class="row' + (kind === 'suspect' ? ' suspect' : '') + '">' +
+            '<div class="main"><div class="text">' + esc(n.text) + '</div>' +
+            '<div class="meta' + (kind === 'suspect' ? ' bad' : '') + '">' + meta + '</div>' + hist + '</div>' +
+            '<div class="acts">' + actions + '</div></div>';
+        }
+
+        function renderSite(site) {
+          var groups = noteGroups(site);
+          var html = '';
+          html += '<div class="detail-head"><h2>' + esc(site.site || site.origin) + '</h2>' +
+            '<span class="badge">' + esc(site.origin) + '</span>' +
+            (site.favorited ? '<span class="badge">已收藏</span>' : '<span class="badge">未收藏（不会注入）</span>') +
+            '</div>';
+          html += '<div class="detail-sub">AI 打开本站时会先看到下面的记忆，并知道这是记忆、不是实时页面。</div>';
+          if (state.error) html += '<div class="banner">' + esc(state.error) + '</div>';
+
+          if (groups.suspect.length) {
+            html += '<div class="group warn">可疑 · ' + groups.suspect.length + ' · 已暂停提供</div>';
+            for (var i = 0; i < groups.suspect.length; i++) html += noteRow(groups.suspect[i], 'suspect');
+          }
+          if (groups.pending.length) {
+            html += '<div class="group">待确认 · ' + groups.pending.length + ' · AI 观察</div>';
+            for (var j = 0; j < groups.pending.length; j++) html += noteRow(groups.pending[j], 'pending');
+          }
+          if (groups.confirmed.length) {
+            html += '<div class="group">已确认 · ' + groups.confirmed.length + '</div>';
+            for (var k = 0; k < groups.confirmed.length; k++) html += noteRow(groups.confirmed[k], 'confirmed');
+          }
+          if (!site.notes.length) html += '<div class="empty">还没有记忆。写一句这个站是干什么的、入口在哪。</div>';
+          html += '<div class="add"><input id="note-draft" placeholder="这个站是干什么的？例如：公司电商后台，常导出订单" value="' +
+            esc(state.noteDraft) + '"><button id="note-add" class="primary">记住</button></div>';
+
+          var cols = site.collections || [];
+          if (cols.length) {
+            html += '<div class="group">🧲 采集配方 · ' + cols.length + '</div>';
+            html += '<div class="hint">一键运行在浏览器面板的地址栏下拉里（不调用模型）；这里可以查看和删除。</div>';
+            for (var ci = 0; ci < cols.length; ci++) {
+              var col = cols[ci];
+              var keys = col.list.fields.map(function (f) { return f.key; }).join('/');
+              var dkeys = col.detail ? ' · 进 ' + col.detail.count + ' 条取 ' + col.detail.fields.map(function (f) { return f.key; }).join('/') : '';
+              var state2 = col.failures >= 2 ? ' · 已失效' : col.lastError ? ' · 上次失败' : '';
+              html += '<div class="row">' +
+                '<div class="main"><div class="text">' + esc(col.name) + '</div>' +
+                '<div class="meta">列表取 ' + esc(keys) + esc(dkeys) + ' · 用过 ' + col.uses + ' 次' + state2 + '</div></div>' +
+                '<div class="acts"><button data-collect-del="' + esc(col.id) + '" title="删除这条采集配方">✕</button></div></div>';
+            }
+          }
+
+          var fails = site.runs.filter(function (r) { return !r.ok; }).slice(0, 5);          if (fails.length) {
+            html += '<div class="group warn">最近的失败 · ' + fails.length + '</div>';
+            for (var f = 0; f < fails.length; f++) {
+              var run = fails[f];
+              var used = (run.injected || []).map(function (id) {
+                var hit = site.notes.filter(function (n) { return n.id === id; })[0];
+                return hit ? hit.text : id;
+              }).slice(0, 2).join('、');
+              html += '<div class="run">' +
+                '<div class="where">第 ' + run.failedStep + ' 步失败：' + esc(run.error || '（没有记录原因）') + '</div>' +
+                '<div class="meta">' + esc(whenLabel(run.at)) + (run.recipeName ? ' · 配方「' + esc(run.recipeName) + '」' : ' · 临时操作') + '</div>' +
+                '<div class="meta">' + (used ? '当时带着记忆：' + esc(used) : '当时没有注入记忆') + '</div>' +
+                '</div>';
+            }
+          }
+          detail.innerHTML = html;
+          var draft = document.getElementById('note-draft');
+          if (draft) {
+            draft.addEventListener('input', function () { state.noteDraft = draft.value; });
+            draft.addEventListener('keydown', function (e) {
+              if (e.key === 'Enter') { e.preventDefault(); addNote(); }
+            });
+          }
+        }
+
+        function addNote() {
+          var site = selectedSite();
+          if (!site) return;
+          var text = (state.noteDraft || '').trim();
+          if (!text) return;
+          req('siteMemory.add', { url: site.origin, text: text })
+            .then(function () { state.noteDraft = ''; state.error = ''; return refresh(); })
+            .catch(fail);
+        }
+
+        // ── workflow detail ──
+        function renderWorkflow(wf) {
+          var html = '';
+          if (state.wfHistoryId === wf.id) {
+            var revs = (wf.revisions || []).slice().reverse();
+            html += '<div class="detail-head"><h2>' + esc(wf.name) + '</h2><span class="badge">修订历史</span></div>';
+            html += '<div class="detail-sub">恢复会回到这一版，并记录一次新的修改。</div>';
+            if (!revs.length) html += '<div class="empty">还没有历史记录</div>';
+            for (var r = 0; r < revs.length; r++) {
+              html += '<div class="hist-row"><span class="when">' + esc(whenLabel(revs[r].at)) + '</span>' +
+                '<span class="t">' + esc(revs[r].name) + ' · ' + revs[r].steps.length + ' 步</span>' +
+                '<button data-wf-restore="' + revs[r].at + '">恢复</button></div>';
+            }
+            html += '<div class="wf-actions"><button class="ghost" id="wf-hist-close">关闭</button></div>';
+            detail.innerHTML = html;
+            return;
+          }
+          if (state.wfDraft && state.wfDraft.id === wf.id) {
+            html += '<div class="detail-head"><h2>编辑工作流</h2></div>';
+            if (state.error) html += '<div class="banner">' + esc(state.error) + '</div>';
+            html += '<div class="wf-editor"><input class="name" id="wf-name" type="text" value="' + esc(state.wfDraft.name) + '" placeholder="名字，例如：每周订单同步">';
+            for (var i = 0; i < state.wfDraft.steps.length; i++) {
+              var st = state.wfDraft.steps[i];
+              html += '<div class="wf-step" data-step="' + i + '">' +
+                '<input class="site" type="text" value="' + esc(st.site) + '" placeholder="网站（可空）">' +
+                '<input class="text" type="text" value="' + esc(st.text) + '" placeholder="这一步做什么">' +
+                '<input class="recipe" type="text" value="' + esc(st.recipe) + '" placeholder="配方名（可空）">' +
+                '<button class="x" data-wf-del-step="' + i + '" title="删除这一步">✕</button></div>';
+            }
+            html += '</div><div class="wf-actions">' +
+              '<button data-wf-add-step="1">＋ 加一步</button>' +
+              '<button class="primary" id="wf-save">保存</button>' +
+              '<button class="ghost" id="wf-cancel">取消</button></div>';
+            detail.innerHTML = html;
+            return;
+          }
+          html += '<div class="detail-head"><h2>' + esc(wf.name) + '</h2>' +
+            '<span class="badge">' + (wf.createdBy === 'agent' ? 'AI 记的' : '你记的') + '</span></div>';
+          html += '<div class="detail-sub">' +
+            '用过 ' + wf.uses + ' 次' +
+            (wf.lastOk ? ' · 上次成功 ' + esc(whenLabel(wf.lastOk)) : '') +
+            (wf.lastError ? ' · 上次失败：' + esc(wf.lastError.message) : '') +
+            '</div>';
+          if (state.error) html += '<div class="banner">' + esc(state.error) + '</div>';
+          for (var j = 0; j < wf.steps.length; j++) {
+            var s = wf.steps[j];
+            html += '<div class="row">' +
+              '<div class="main"><div class="text">' + (j + 1) + '. ' + esc(s.text) + '</div>' +
+              '<div class="meta">' +
+                (s.site ? '网站：' + esc(s.site) : '网站：当前页') +
+                (s.recipe ? ' · 配方「' + esc(s.recipe) + '」' : '') +
+              '</div></div></div>';
+          }
+          html += '<div class="hint">工作流只是清单：agent 仍按正常工具逐步操作，登录、验证码和确认框仍由你完成。</div>';
+          html += '<div class="wf-actions">' +
+            '<button id="wf-edit">编辑</button>' +
+            '<button id="wf-history">修订历史</button>' +
+            '<button class="danger" id="wf-delete">删除</button></div>';
+          detail.innerHTML = html;
+        }
+
+        function renderNewWorkflow() {
+          if (!state.wfDraft) state.wfDraft = { name: '', steps: [{ text: '', site: '', recipe: '' }] };
+          var d = state.wfDraft;
+          var html = '<div class="detail-head"><h2>新建工作流</h2></div>';
+          html += '<div class="detail-sub">把固定套路写成一串步骤，注明在哪一步、用哪个网站的配方。</div>';
+          if (state.error) html += '<div class="banner">' + esc(state.error) + '</div>';
+          html += '<input class="name" id="wf-name" type="text" value="' + esc(d.name) + '" placeholder="名字，例如：每周订单同步">';
+          for (var i = 0; i < d.steps.length; i++) {
+            var st = d.steps[i];
+            html += '<div class="wf-step" data-step="' + i + '">' +
+              '<input class="site" type="text" value="' + esc(st.site) + '" placeholder="网站（可空）">' +
+              '<input class="text" type="text" value="' + esc(st.text) + '" placeholder="这一步做什么">' +
+              '<input class="recipe" type="text" value="' + esc(st.recipe) + '" placeholder="配方名（可空）">' +
+              '<button class="x" data-wf-del-step="' + i + '" title="删除这一步">✕</button></div>';
+          }
+          html += '<div class="wf-actions">' +
+            '<button data-wf-add-step="1">＋ 加一步</button>' +
+            '<button class="primary" id="wf-save">保存</button>' +
+            '<button class="ghost" id="wf-cancel">取消</button></div>';
+          detail.innerHTML = html;
+        }
+
+        function readDraft() {
+          var nameEl = document.getElementById('wf-name');
+          if (nameEl) state.wfDraft.name = nameEl.value;
+          var rows = detail.querySelectorAll('.wf-step');
+          for (var i = 0; i < rows.length; i++) {
+            var row = rows[i];
+            var idx = Number(row.getAttribute('data-step'));
+            if (!state.wfDraft.steps[idx]) continue;
+            state.wfDraft.steps[idx].site = row.querySelector('.site').value;
+            state.wfDraft.steps[idx].text = row.querySelector('.text').value;
+            state.wfDraft.steps[idx].recipe = row.querySelector('.recipe').value;
+          }
+        }
+
+        function saveWorkflow() {
+          readDraft();
+          var steps = state.wfDraft.steps
+            .filter(function (s) { return s.text.trim(); })
+            .map(function (s) {
+              return { text: s.text.trim(), site: s.site.trim(), recipe: s.recipe.trim() };
+            });
+          var name = (state.wfDraft.name || '').trim();
+          if (!name) { fail('工作流需要一个名字'); return; }
+          if (!steps.length) { fail('至少写一步'); return; }
+          var call = state.wfDraft.id
+            ? req('workflows.update', { id: state.wfDraft.id, name: name, steps: steps })
+            : req('workflows.add', { name: name, steps: steps });
+          call.then(function (res) {
+            state.wfDraft = null;
+            state.error = '';
+            if (res && res.workflow) state.sel = { kind: 'workflow', id: res.workflow.id };
+            return refresh();
+          }).catch(fail);
+        }
+
+        function renderDetail() {
+          if (!state.overview) { detail.innerHTML = '<div class="empty">加载中…</div>'; return; }
+          if (state.sel && state.sel.kind === 'new') { renderNewWorkflow(); return; }
+          var wf = selectedWorkflow();
+          if (wf) { renderWorkflow(wf); return; }
+          var site = selectedSite();
+          if (site) { renderSite(site); return; }
+          detail.innerHTML = '<div class="empty">左边选一个网站或工作流</div>';
+        }
+
+        function render() {
+          renderSide();
+          renderDetail();
+        }
+
+        function refresh() {
+          return req('memory.overview')
+            .then(function (res) {
+              state.overview = res;
+              if (state.sel && state.sel.kind === 'site') {
+                var still = res.sites.some(function (s) { return s.origin === state.sel.origin; });
+                if (!still) state.sel = null;
+              }
+              if (state.sel && state.sel.kind === 'workflow') {
+                var stillWf = res.workflows.some(function (w) { return w.id === state.sel.id; });
+                if (!stillWf) state.sel = null;
+              }
+              render();
+            })
+            .catch(function (err) { fail(err); });
+        }
+
+        function scheduleRefresh() {
+          if (refreshTimer) clearTimeout(refreshTimer);
+          refreshTimer = setTimeout(function () { refreshTimer = null; refresh(); }, 200);
+        }
+
+        // ── events ──
+        side.addEventListener('click', function (e) {
+          var siteBtn = e.target.closest ? e.target.closest('[data-site]') : null;
+          if (siteBtn) {
+            state.sel = { kind: 'site', origin: siteBtn.getAttribute('data-site') };
+            state.editingNoteId = '';
+            state.noteEditDraft = '';
+            state.historyNoteId = '';
+            state.wfDraft = null;
+            state.wfHistoryId = '';
+            state.error = '';
+            render();
+            return;
+          }
+          var wfBtn = e.target.closest ? e.target.closest('[data-wf]') : null;
+          if (wfBtn) {
+            state.sel = { kind: 'workflow', id: wfBtn.getAttribute('data-wf') };
+            state.wfDraft = null;
+            state.wfHistoryId = '';
+            state.editingNoteId = '';
+            state.noteEditDraft = '';
+            state.historyNoteId = '';
+            state.error = '';
+            render();
+            return;
+          }
+          var newBtn = e.target.closest ? e.target.closest('[data-new-wf]') : null;
+          if (newBtn) {
+            state.sel = { kind: 'new' };
+            state.wfDraft = { name: '', steps: [{ text: '', site: '', recipe: '' }] };
+            state.error = '';
+            render();
+          }
+        });
+
+        detail.addEventListener('click', function (e) {
+          var t = e.target;
+          var btn;
+
+          // ── notes ──
+          if ((btn = t.closest ? t.closest('[data-collect-del]') : null)) {
+            req('collections.remove', { id: btn.getAttribute('data-collect-del') })
+              .then(refresh).catch(fail);
+            return;
+          }
+          if ((btn = t.closest ? t.closest('[data-mem-confirm]') : null)) {
+            req('siteMemory.update', { id: btn.getAttribute('data-mem-confirm'), verified: true })
+              .then(refresh).catch(fail);
+            return;
+          }
+          if ((btn = t.closest ? t.closest('[data-mem-resolve]') : null)) {
+            req('siteMemory.resolve', { id: btn.getAttribute('data-mem-resolve') })
+              .then(refresh).catch(fail);
+            return;
+          }
+          if ((btn = t.closest ? t.closest('[data-mem-del]') : null)) {
+            req('siteMemory.remove', { id: btn.getAttribute('data-mem-del') })
+              .then(refresh).catch(fail);
+            return;
+          }
+          if ((btn = t.closest ? t.closest('[data-mem-toggle]') : null)) {
+            var site = selectedSite();
+            var id = btn.getAttribute('data-mem-toggle');
+            var note = site && site.notes.filter(function (n) { return n.id === id; })[0];
+            req('siteMemory.update', { id: id, enabled: !(note && note.enabled === false) })
+              .then(refresh).catch(fail);
+            return;
+          }
+          if ((btn = t.closest ? t.closest('[data-mem-edit]') : null)) {
+            state.editingNoteId = btn.getAttribute('data-mem-edit');
+            var editSite = selectedSite();
+            var editTarget = editSite && editSite.notes.filter(function (n) { return n.id === state.editingNoteId; })[0];
+            state.noteEditDraft = editTarget ? editTarget.text : '';
+            state.historyNoteId = '';
+            render();
+            return;
+          }
+          if ((btn = t.closest ? t.closest('[data-mem-history]') : null)) {
+            state.historyNoteId = btn.getAttribute('data-mem-history');
+            state.editingNoteId = '';
+            render();
+            return;
+          }
+          if ((btn = t.closest ? t.closest('[data-mem-restore]') : null)) {
+            req('siteMemory.restore', {
+              id: btn.getAttribute('data-note'),
+              at: Number(btn.getAttribute('data-mem-restore')),
+            }).then(function () { state.historyNoteId = ''; return refresh(); }).catch(fail);
+            return;
+          }
+          if ((btn = t.closest ? t.closest('.hist-close') : null)) {
+            state.historyNoteId = '';
+            render();
+            return;
+          }
+          if ((btn = t.closest ? t.closest('.edit-save') : null)) {
+            var box = detail.querySelector('[data-edit-id]');
+            if (!box) return;
+            req('siteMemory.update', {
+              id: box.getAttribute('data-edit-id'),
+              text: state.noteEditDraft || box.querySelector('.edit-input').value,
+            }).then(function () { state.editingNoteId = ''; state.noteEditDraft = ''; return refresh(); }).catch(fail);
+            return;
+          }
+          if ((btn = t.closest ? t.closest('.edit-cancel') : null)) {
+            state.editingNoteId = '';
+            state.noteEditDraft = '';
+            render();
+            return;
+          }
+          if ((btn = t.closest ? t.closest('#note-add') : null)) {
+            addNote();
+            return;
+          }
+
+          // ── workflows ──
+          if ((btn = t.closest ? t.closest('#wf-edit') : null)) {
+            var wf = selectedWorkflow();
+            if (!wf) return;
+            state.wfDraft = {
+              id: wf.id,
+              name: wf.name,
+              steps: wf.steps.map(function (s) { return { text: s.text, site: s.site || '', recipe: s.recipe || '' }; }),
+            };
+            state.wfHistoryId = '';
+            render();
+            return;
+          }
+          if ((btn = t.closest ? t.closest('#wf-history') : null)) {
+            var wf2 = selectedWorkflow();
+            state.wfHistoryId = wf2 ? wf2.id : '';
+            state.wfDraft = null;
+            render();
+            return;
+          }
+          if ((btn = t.closest ? t.closest('#wf-hist-close') : null)) {
+            state.wfHistoryId = '';
+            render();
+            return;
+          }
+          if ((btn = t.closest ? t.closest('[data-wf-restore]') : null)) {
+            var wfId = selectedWorkflow() && selectedWorkflow().id;
+            req('workflows.restore', {
+              id: wfId,
+              at: Number(btn.getAttribute('data-wf-restore')),
+            }).then(function () { state.wfHistoryId = ''; return refresh(); }).catch(fail);
+            return;
+          }
+          if ((btn = t.closest ? t.closest('#wf-delete') : null)) {
+            var wf3 = selectedWorkflow();
+            if (!wf3) return;
+            req('workflows.remove', { id: wf3.id })
+              .then(function () { state.sel = null; return refresh(); }).catch(fail);
+            return;
+          }
+          if ((btn = t.closest ? t.closest('[data-wf-add-step]') : null)) {
+            readDraft();
+            state.wfDraft.steps.push({ text: '', site: '', recipe: '' });
+            render();
+            return;
+          }
+          if ((btn = t.closest ? t.closest('[data-wf-del-step]') : null)) {
+            readDraft();
+            var idx = Number(btn.getAttribute('data-wf-del-step'));
+            state.wfDraft.steps.splice(idx, 1);
+            if (!state.wfDraft.steps.length) state.wfDraft.steps.push({ text: '', site: '', recipe: '' });
+            render();
+            return;
+          }
+          if ((btn = t.closest ? t.closest('#wf-save') : null)) {
+            saveWorkflow();
+            return;
+          }
+          if ((btn = t.closest ? t.closest('#wf-cancel') : null)) {
+            state.wfDraft = null;
+            if (state.sel && state.sel.kind === 'new') state.sel = null;
+            render();
+          }
+        });
+
+        // Typing must survive a background refresh (an agent write elsewhere
+        // triggers one): keep the draft in state, not only in the input.
+        detail.addEventListener('input', function (e) {
+          var el = e.target;
+          if (!el || !el.classList) return;
+          if (el.classList.contains('edit-input') && state.editingNoteId) {
+            state.noteEditDraft = el.value;
+            return;
+          }
+          if (!state.wfDraft) return;
+          if (el.id === 'wf-name') { state.wfDraft.name = el.value; return; }
+          var row = el.closest ? el.closest('.wf-step') : null;
+          if (!row) return;
+          var idx = Number(row.getAttribute('data-step'));
+          var step = state.wfDraft.steps[idx];
+          if (!step) return;
+          if (el.classList.contains('site')) step.site = el.value;
+          else if (el.classList.contains('text')) step.text = el.value;
+          else if (el.classList.contains('recipe')) step.recipe = el.value;
+        });
+
+        search.addEventListener('input', function () {
+          state.query = search.value;
+          render();
+        });
+        document.getElementById('refresh').addEventListener('click', function () {
+          state.error = '';
+          refresh();
+        });
+
+        window.piSDK.onMessage(function (msg) {
+          if (!msg || !msg.event) return;
+          if (
+            msg.event === 'ui.siteMemoryChanged' ||
+            msg.event === 'ui.siteRunsChanged' ||
+            msg.event === 'ui.workflowsChanged' ||
+            msg.event === 'ui.favoritesChanged'
+          ) {
+            scheduleRefresh();
+          }
+        });
+
+        refresh();
+      })();
+    </script>
+  </body>
+</html>

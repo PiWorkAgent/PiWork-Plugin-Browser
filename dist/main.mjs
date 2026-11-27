@@ -3040,6 +3040,26 @@ var HISTORY_KEY = "history.entries";
 var FAVORITES_KEY = "favorites.items";
 var SETTINGS_KEY = "settings";
 var RECIPES_KEY = "recipes.items";
+var SITE_NOTES_KEY = "site.notes";
+var SITE_RUNS_KEY = "site.runs";
+var SITE_RUNS_MAX = 50;
+var INJECTION_TTL_MS = 30 * 6e4;
+var NOTE_REVISIONS_MAX = 10;
+var WORKFLOWS_KEY = "workflows.items";
+var WORKFLOWS_MAX = 100;
+var WORKFLOW_STEPS_MAX = 20;
+var WORKFLOW_REVISIONS_MAX = 10;
+var COLLECTIONS_KEY = "collections.items";
+var COLLECTIONS_MAX = 50;
+var COLLECT_FIELDS_MAX = 12;
+var COLLECT_ROWS_MAX = 50;
+var COLLECT_DETAIL_MAX = 5;
+var COLLECT_VALUE_MAX_CHARS = 600;
+var COLLECT_WAIT_MS = 8e3;
+var SITE_NOTE_MAX_CHARS = 240;
+var SITE_NOTES_MAX = 40;
+var SITE_NOTE_INJECT_MAX = 8;
+var SITE_NOTE_INJECT_CHARS = 700;
 var HISTORY_MAX = 500;
 var OMNIBOX_RECENT = 8;
 var OMNIBOX_LIMIT = 30;
@@ -3543,6 +3563,12 @@ __name(pushTabs, "pushTabs");
 var history = [];
 var favorites = [];
 var recipes = [];
+var siteNotes = [];
+var runLog = [];
+var workflows = [];
+var collections = [];
+var lastInjected = /* @__PURE__ */ new Map();
+var memoryNudged = /* @__PURE__ */ new Set();
 var clips = [];
 var privateMode = false;
 var selPopup = true;
@@ -3690,6 +3716,523 @@ function isFavoriteOrigin(origin) {
   return !!origin && favorites.some((f) => originOfUrl(f.url) === origin);
 }
 __name(isFavoriteOrigin, "isFavoriteOrigin");
+function notesFor(origin) {
+  return origin ? siteNotes.filter((n) => n.origin === origin) : [];
+}
+__name(notesFor, "notesFor");
+function liveNotes(origin) {
+  return notesFor(origin).filter((n) => n.enabled !== false && !n.suspect);
+}
+__name(liveNotes, "liveNotes");
+function siteMemoryDigest(origin) {
+  const empty = { text: "", ids: [] };
+  if (!isFavoriteOrigin(origin)) return empty;
+  const notes = liveNotes(origin);
+  if (notes.length === 0) return empty;
+  const shown = [];
+  let used = 0;
+  for (const note of notes.slice(0, SITE_NOTE_INJECT_MAX)) {
+    if (shown.length > 0 && used + note.text.length > SITE_NOTE_INJECT_CHARS) break;
+    shown.push(note);
+    used += note.text.length;
+  }
+  const rest = notes.length - shown.length;
+  const pending = notes.filter((n) => n.verified === false).length;
+  return {
+    ids: shown.map((n) => n.id),
+    text: `\u3010\u672C\u7AD9\u8BB0\u5FC6 \xB7 ${notes.length} \u6761${pending > 0 ? `\uFF0C\u5176\u4E2D ${pending} \u6761\u672A\u786E\u8BA4` : ""}\uFF0C\u7528\u6237\u6C89\u6DC0\u7684\u957F\u671F\u77E5\u8BC6\u3011
+` + shown.map((n) => `- ${n.text}${n.verified === false ? "\uFF08AI \u89C2\u5BDF\uFF0C\u672A\u786E\u8BA4\uFF09" : ""}`).join("\n") + (rest > 0 ? `
+\uFF08\u53E6\u6709 ${rest} \u6761\uFF0C\u7528 browser_site_memory \u67E5\u770B\uFF09` : "") + "\n\u8FD9\u662F\u8BB0\u5FC6\uFF0C\u4E0D\u662F\u5F53\u524D\u9875\u9762\u7684\u5B9E\u65F6\u72B6\u6001\uFF1A\u4E0E\u9875\u9762\u4E0D\u7B26\u65F6\u4EE5\u9875\u9762\u4E3A\u51C6\uFF0C\u7528 browser_site_memory \u7684 dispute \u62A5\u544A\u54EA\u6761\u4E0D\u5BF9\uFF08\u5B83\u4F1A\u88AB\u6807\u4E3A\u53EF\u7591\u3001\u6682\u505C\u63D0\u4F9B\uFF09\u3002"
+  };
+}
+__name(siteMemoryDigest, "siteMemoryDigest");
+function memoryLearningHint(sessionKey, origin, stepCount) {
+  if (stepCount < 2 || !origin || !isFavoriteOrigin(origin)) return "";
+  if (notesFor(origin).some((n) => n.verified === false)) return "";
+  const key = `${sessionKey ?? ""}|${origin}`;
+  if (memoryNudged.has(key)) return "";
+  if (memoryNudged.size > 1e3) memoryNudged.clear();
+  memoryNudged.add(key);
+  return "\n\n\uFF08\u672C\u7AD9\u5DF2\u6536\u85CF\uFF1A\u5982\u679C\u8FD9\u6B21\u64CD\u4F5C\u91CC\u6709\u4E00\u6761\u4E0B\u6B21\u80FD\u7701\u4E8B\u7684\u3001\u53EF\u9A8C\u8BC1\u7684\u4E8B\u5B9E\u2014\u2014\u5165\u53E3\u5728\u54EA\u3001\u5B57\u6BB5\u53EB\u4EC0\u4E48\u3001\u64CD\u4F5C\u540E\u9875\u9762\u600E\u4E48\u53D8\u2014\u2014\u53EF\u4EE5\u7528 browser_site_memory \u8BB0\u4E00\u6761\uFF0C\u7528\u6237\u5728\u9762\u677F\u91CC\u786E\u8BA4\u540E\u8F6C\u6B63\uFF1B\u5224\u65AD\u6027\u7684\u89C4\u77E9\u4E0D\u8981\u81EA\u5DF1\u5199\u3002\uFF09";
+}
+__name(memoryLearningHint, "memoryLearningHint");
+function normalizeNoteText(input) {
+  return String(input ?? "").replace(/\s+/g, " ").trim().slice(0, SITE_NOTE_MAX_CHARS);
+}
+__name(normalizeNoteText, "normalizeNoteText");
+function newNoteId() {
+  return `m${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+}
+__name(newNoteId, "newNoteId");
+async function addSiteNote(ctx, url, text, by) {
+  const origin = originOfUrl(url);
+  if (!origin) throw new Error("\u8FD9\u4E2A\u9875\u9762\u8FD8\u6CA1\u6709\u7F51\u5740\uFF0C\u5148\u6253\u5F00\u4E00\u4E2A\u7F51\u9875");
+  const clean = normalizeNoteText(text);
+  if (!clean) throw new Error("\u5199\u4E00\u53E5\u8FD9\u4E2A\u7F51\u7AD9\u7684\u7528\u9014\u6216\u6CE8\u610F\u4E8B\u9879");
+  const mine = notesFor(origin);
+  if (mine.length >= SITE_NOTES_MAX) {
+    throw new Error(`\u672C\u7AD9\u8BB0\u5FC6\u5DF2\u7ECF\u6709 ${SITE_NOTES_MAX} \u6761\uFF0C\u5148\u5220\u6389\u4E00\u4E9B\u518D\u8BB0`);
+  }
+  const now = Date.now();
+  const note = {
+    id: newNoteId(),
+    origin,
+    site: siteOf(url),
+    text: clean,
+    by,
+    // A person's own sentence is confirmed by definition; the agent's is a
+    // proposal until the user confirms it in the panel.
+    verified: by === "user",
+    createdAt: now,
+    updatedAt: now,
+    enabled: true
+  };
+  siteNotes = [note, ...siteNotes];
+  await save(ctx, SITE_NOTES_KEY, siteNotes, "site memory");
+  broadcast(ctx, "ui.siteMemoryChanged", { origin });
+  return note;
+}
+__name(addSiteNote, "addSiteNote");
+function pushRevision(note, by) {
+  note.revisions = [
+    ...note.revisions ?? [],
+    { at: Date.now(), by, text: note.text, verified: note.verified, enabled: note.enabled }
+  ].slice(-NOTE_REVISIONS_MAX);
+}
+__name(pushRevision, "pushRevision");
+async function updateSiteNote(ctx, id, patch, by) {
+  const note = siteNotes.find((n) => n.id === id);
+  if (!note) throw new Error("\u6CA1\u6709\u627E\u5230\u8FD9\u6761\u8BB0\u5FC6");
+  let nextText;
+  if (typeof patch.text === "string") {
+    nextText = normalizeNoteText(patch.text);
+    if (!nextText) throw new Error("\u8BB0\u5FC6\u4E0D\u80FD\u4E3A\u7A7A\uFF0C\u4E0D\u9700\u8981\u5C31\u5220\u6389");
+  }
+  const nextEnabled = typeof patch.enabled === "boolean" ? patch.enabled : void 0;
+  const nextVerified = typeof patch.verified === "boolean" ? patch.verified : void 0;
+  const changes = nextText !== void 0 && nextText !== note.text || nextEnabled !== void 0 && nextEnabled !== note.enabled || nextVerified !== void 0 && nextVerified !== note.verified;
+  if (changes) pushRevision(note, by);
+  if (nextText !== void 0) note.text = nextText;
+  if (nextEnabled !== void 0) note.enabled = nextEnabled;
+  if (nextVerified !== void 0) note.verified = nextVerified;
+  note.updatedAt = Date.now();
+  await save(ctx, SITE_NOTES_KEY, siteNotes, "site memory");
+  broadcast(ctx, "ui.siteMemoryChanged", { origin: note.origin });
+  return note;
+}
+__name(updateSiteNote, "updateSiteNote");
+async function removeSiteNote(ctx, id) {
+  const note = siteNotes.find((n) => n.id === id);
+  if (!note) throw new Error("\u6CA1\u6709\u627E\u5230\u8FD9\u6761\u8BB0\u5FC6");
+  siteNotes = siteNotes.filter((n) => n !== note);
+  await save(ctx, SITE_NOTES_KEY, siteNotes, "site memory");
+  broadcast(ctx, "ui.siteMemoryChanged", { origin: note.origin });
+  return note;
+}
+__name(removeSiteNote, "removeSiteNote");
+async function disputeSiteNote(ctx, id, reason, url) {
+  const note = siteNotes.find((n) => n.id === id);
+  if (!note) throw new Error("\u6CA1\u6709\u627E\u5230\u8FD9\u6761\u8BB0\u5FC6");
+  const clean = normalizeNoteText(reason);
+  if (!clean) throw new Error("dispute \u9700\u8981 reason\uFF1A\u9875\u9762\u548C\u8FD9\u6761\u8BB0\u5FC6\u54EA\u91CC\u4E0D\u7B26");
+  note.suspect = { at: Date.now(), reason: clean, url };
+  note.updatedAt = Date.now();
+  await save(ctx, SITE_NOTES_KEY, siteNotes, "site memory");
+  broadcast(ctx, "ui.siteMemoryChanged", { origin: note.origin });
+  return note;
+}
+__name(disputeSiteNote, "disputeSiteNote");
+async function resolveSiteNote(ctx, id) {
+  const note = siteNotes.find((n) => n.id === id);
+  if (!note) throw new Error("\u6CA1\u6709\u627E\u5230\u8FD9\u6761\u8BB0\u5FC6");
+  if (!note.suspect) throw new Error("\u8FD9\u6761\u8BB0\u5FC6\u6CA1\u6709\u88AB\u6807\u8BB0\u4E3A\u53EF\u7591");
+  pushRevision(note, "user");
+  delete note.suspect;
+  note.verified = true;
+  note.updatedAt = Date.now();
+  await save(ctx, SITE_NOTES_KEY, siteNotes, "site memory");
+  broadcast(ctx, "ui.siteMemoryChanged", { origin: note.origin });
+  return note;
+}
+__name(resolveSiteNote, "resolveSiteNote");
+async function restoreSiteNote(ctx, id, at) {
+  const note = siteNotes.find((n) => n.id === id);
+  if (!note) throw new Error("\u6CA1\u6709\u627E\u5230\u8FD9\u6761\u8BB0\u5FC6");
+  const revision = (note.revisions ?? []).find((r) => r.at === at);
+  if (!revision) throw new Error("\u6CA1\u6709\u627E\u5230\u8FD9\u6761\u5386\u53F2\u8BB0\u5F55");
+  pushRevision(note, "user");
+  note.text = revision.text;
+  note.verified = revision.verified;
+  note.enabled = revision.enabled;
+  delete note.suspect;
+  note.updatedAt = Date.now();
+  await save(ctx, SITE_NOTES_KEY, siteNotes, "site memory");
+  broadcast(ctx, "ui.siteMemoryChanged", { origin: note.origin });
+  return note;
+}
+__name(restoreSiteNote, "restoreSiteNote");
+async function recordRun(ctx, run) {
+  if (!isFavoriteOrigin(run.origin)) return;
+  const record = {
+    id: `x${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`,
+    ...run
+  };
+  runLog = [record, ...runLog].slice(0, SITE_RUNS_MAX);
+  await save(ctx, SITE_RUNS_KEY, runLog, "site runs");
+  broadcast(ctx, "ui.siteRunsChanged", { origin: run.origin });
+}
+__name(recordRun, "recordRun");
+function normalizeWorkflowSteps(input) {
+  if (!Array.isArray(input)) return [];
+  const out = [];
+  for (const raw of input.slice(0, WORKFLOW_STEPS_MAX)) {
+    if (!raw || typeof raw !== "object") continue;
+    const r = raw;
+    const text = normalizeNoteText(r.text);
+    if (!text) continue;
+    const site = typeof r.site === "string" ? r.site.trim().slice(0, 120) : "";
+    const recipe = typeof r.recipe === "string" ? r.recipe.trim().slice(0, 80) : "";
+    out.push({ text, ...site ? { site } : {}, ...recipe ? { recipe } : {} });
+  }
+  return out;
+}
+__name(normalizeWorkflowSteps, "normalizeWorkflowSteps");
+function normalizeWorkflowRevisions(input) {
+  if (!Array.isArray(input)) return [];
+  return input.filter((v) => v && Array.isArray(v.steps)).map((v) => ({
+    at: Number(v.at) || Date.now(),
+    by: v.by === "agent" ? "agent" : "user",
+    name: String(v.name ?? ""),
+    steps: normalizeWorkflowSteps(v.steps)
+  })).slice(-WORKFLOW_REVISIONS_MAX);
+}
+__name(normalizeWorkflowRevisions, "normalizeWorkflowRevisions");
+function workflowById(id) {
+  return workflows.find((w) => w.id === id);
+}
+__name(workflowById, "workflowById");
+function pushWorkflowRevision(workflow, by) {
+  workflow.revisions = [
+    ...workflow.revisions ?? [],
+    { at: Date.now(), by, name: workflow.name, steps: workflow.steps.map((s) => ({ ...s })) }
+  ].slice(-WORKFLOW_REVISIONS_MAX);
+}
+__name(pushWorkflowRevision, "pushWorkflowRevision");
+function workflowStepsKey(steps) {
+  return JSON.stringify(steps.map((s) => [s.text, s.site ?? "", s.recipe ?? ""]));
+}
+__name(workflowStepsKey, "workflowStepsKey");
+async function addWorkflow(ctx, name, steps, by) {
+  const cleanName = normalizeNoteText(name).slice(0, 80);
+  if (!cleanName) throw new Error("\u5DE5\u4F5C\u6D41\u9700\u8981\u4E00\u4E2A\u540D\u5B57");
+  if (steps.length === 0) throw new Error("\u5DE5\u4F5C\u6D41\u81F3\u5C11\u8981\u6709\u4E00\u6B65");
+  if (workflows.length >= WORKFLOWS_MAX) throw new Error(`\u5DE5\u4F5C\u6D41\u5DF2\u7ECF\u6709 ${WORKFLOWS_MAX} \u4E2A\uFF0C\u5148\u5220\u6389\u4E00\u4E9B`);
+  const now = Date.now();
+  const workflow = {
+    id: `w${now.toString(36)}${Math.random().toString(36).slice(2, 5)}`,
+    name: cleanName,
+    steps,
+    createdBy: by,
+    createdAt: now,
+    updatedAt: now,
+    uses: 0
+  };
+  workflows = [workflow, ...workflows];
+  await save(ctx, WORKFLOWS_KEY, workflows, "workflows");
+  broadcast(ctx, "ui.workflowsChanged", { id: workflow.id });
+  return workflow;
+}
+__name(addWorkflow, "addWorkflow");
+async function updateWorkflow(ctx, id, patch, by) {
+  const workflow = workflowById(id);
+  if (!workflow) throw new Error("\u6CA1\u6709\u627E\u5230\u8FD9\u4E2A\u5DE5\u4F5C\u6D41");
+  const nextName = patch.name === void 0 ? workflow.name : normalizeNoteText(patch.name).slice(0, 80);
+  if (!nextName) throw new Error("\u5DE5\u4F5C\u6D41\u9700\u8981\u4E00\u4E2A\u540D\u5B57");
+  const nextSteps = patch.steps === void 0 ? workflow.steps : patch.steps;
+  if (nextSteps.length === 0) throw new Error("\u5DE5\u4F5C\u6D41\u81F3\u5C11\u8981\u6709\u4E00\u6B65");
+  const changed = nextName !== workflow.name || workflowStepsKey(nextSteps) !== workflowStepsKey(workflow.steps);
+  if (changed) pushWorkflowRevision(workflow, by);
+  workflow.name = nextName;
+  workflow.steps = nextSteps;
+  workflow.updatedAt = Date.now();
+  await save(ctx, WORKFLOWS_KEY, workflows, "workflows");
+  broadcast(ctx, "ui.workflowsChanged", { id: workflow.id });
+  return workflow;
+}
+__name(updateWorkflow, "updateWorkflow");
+async function removeWorkflow(ctx, id) {
+  const workflow = workflowById(id);
+  if (!workflow) throw new Error("\u6CA1\u6709\u627E\u5230\u8FD9\u4E2A\u5DE5\u4F5C\u6D41");
+  workflows = workflows.filter((w) => w !== workflow);
+  await save(ctx, WORKFLOWS_KEY, workflows, "workflows");
+  broadcast(ctx, "ui.workflowsChanged", { id: workflow.id });
+  return workflow;
+}
+__name(removeWorkflow, "removeWorkflow");
+async function restoreWorkflow(ctx, id, at) {
+  const workflow = workflowById(id);
+  if (!workflow) throw new Error("\u6CA1\u6709\u627E\u5230\u8FD9\u4E2A\u5DE5\u4F5C\u6D41");
+  const revision = (workflow.revisions ?? []).find((r) => r.at === at);
+  if (!revision) throw new Error("\u6CA1\u6709\u627E\u5230\u8FD9\u6761\u5386\u53F2\u8BB0\u5F55");
+  pushWorkflowRevision(workflow, "user");
+  workflow.name = revision.name;
+  workflow.steps = revision.steps;
+  workflow.updatedAt = Date.now();
+  await save(ctx, WORKFLOWS_KEY, workflows, "workflows");
+  broadcast(ctx, "ui.workflowsChanged", { id: workflow.id });
+  return workflow;
+}
+__name(restoreWorkflow, "restoreWorkflow");
+async function markWorkflow(ctx, id, ok, error) {
+  const workflow = workflowById(id);
+  if (!workflow) throw new Error("\u6CA1\u6709\u627E\u5230\u8FD9\u4E2A\u5DE5\u4F5C\u6D41");
+  workflow.uses += 1;
+  workflow.updatedAt = Date.now();
+  if (ok) {
+    workflow.lastOk = Date.now();
+    delete workflow.lastError;
+  } else {
+    workflow.lastError = {
+      at: Date.now(),
+      message: normalizeNoteText(error).slice(0, 300) || "\u5931\u8D25\uFF08\u6CA1\u6709\u8BB0\u5F55\u539F\u56E0\uFF09"
+    };
+  }
+  await save(ctx, WORKFLOWS_KEY, workflows, "workflows");
+  broadcast(ctx, "ui.workflowsChanged", { id: workflow.id });
+  return workflow;
+}
+__name(markWorkflow, "markWorkflow");
+function normalizeCollectFields(input) {
+  if (!Array.isArray(input)) return [];
+  const out = [];
+  for (const raw of input.slice(0, COLLECT_FIELDS_MAX)) {
+    if (!raw || typeof raw !== "object") continue;
+    const r = raw;
+    const key = String(r.key ?? "").trim().slice(0, 40);
+    if (!key) continue;
+    const selector = String(r.selector ?? "").trim().slice(0, 300);
+    const attr = typeof r.attr === "string" ? r.attr.trim().slice(0, 40) : "";
+    out.push({ key, selector, ...attr && attr !== "text" ? { attr } : {} });
+  }
+  return out;
+}
+__name(normalizeCollectFields, "normalizeCollectFields");
+function collectionSpecFrom(input) {
+  const url = normalizeUrl(String(input.url ?? "").trim());
+  const name = normalizeNoteText(input.name).slice(0, 80);
+  if (!name) throw new Error("\u91C7\u96C6\u914D\u65B9\u9700\u8981\u4E00\u4E2A\u540D\u5B57");
+  const listRaw = input.list ?? {};
+  const fields = normalizeCollectFields(listRaw.fields);
+  if (fields.length === 0) {
+    throw new Error("list.fields \u81F3\u5C11\u8981\u6709 1 \u4E2A\u5B57\u6BB5\uFF1A{ key, selector }");
+  }
+  const scope = typeof listRaw.scope === "string" ? listRaw.scope.trim().slice(0, 300) : "";
+  const limit = Math.min(COLLECT_ROWS_MAX, Math.max(1, Number(listRaw.limit) || 20));
+  const detailRaw = input.detail && typeof input.detail === "object" ? input.detail : null;
+  let detail;
+  if (detailRaw) {
+    const urlField = String(detailRaw.urlField ?? "").trim();
+    const detailFields = normalizeCollectFields(detailRaw.fields);
+    if (urlField && detailFields.length > 0) {
+      detail = {
+        urlField: urlField.slice(0, 40),
+        fields: detailFields,
+        ...typeof detailRaw.waitFor === "string" && detailRaw.waitFor.trim() ? { waitFor: detailRaw.waitFor.trim().slice(0, 300) } : {},
+        count: Math.min(COLLECT_DETAIL_MAX, Math.max(1, Number(detailRaw.count) || 3))
+      };
+    }
+  }
+  return { name, url, list: { scope, fields, limit }, ...detail ? { detail } : {} };
+}
+__name(collectionSpecFrom, "collectionSpecFrom");
+function collectExpression(scope, fields, limit) {
+  const spec = { scope, fields, limit };
+  return `(() => {
+    const spec = ${JSON.stringify(spec)};
+    const nodes = spec.scope ? Array.from(document.querySelectorAll(spec.scope)) : [document.documentElement];
+    return nodes.slice(0, spec.limit).map((node) => {
+      const rec = {};
+      for (const f of spec.fields) {
+        const el = f.selector ? node.querySelector(f.selector) : node;
+        if (!el) { rec[f.key] = ''; continue; }
+        const attr = f.attr || 'text';
+        let value;
+        if (attr === 'text') value = (el.textContent || '').trim().replace(/\\s+/g, ' ');
+        else if (attr === 'href') value = el.href || el.getAttribute('href') || '';
+        else value = el.getAttribute(attr) || '';
+        rec[f.key] = String(value).slice(0, ${COLLECT_VALUE_MAX_CHARS});
+      }
+      return rec;
+    });
+  })()`;
+}
+__name(collectExpression, "collectExpression");
+async function collectEvaluate(ctx, tid, expression) {
+  const r = await ctx.call("browser.evaluate", {
+    expression,
+    ...tid ? { tabId: tid } : {}
+  });
+  return r?.result;
+}
+__name(collectEvaluate, "collectEvaluate");
+async function waitForSelector(ctx, tid, selector, timeoutMs = COLLECT_WAIT_MS) {
+  if (!selector) return true;
+  const deadline = Date.now() + timeoutMs;
+  const expression = `!!document.querySelector(${JSON.stringify(selector)})`;
+  while (Date.now() < deadline) {
+    try {
+      if (await collectEvaluate(ctx, tid, expression)) return true;
+    } catch {
+    }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  return false;
+}
+__name(waitForSelector, "waitForSelector");
+function collectionById(id) {
+  return collections.find((c) => c.id === id);
+}
+__name(collectionById, "collectionById");
+async function addCollection(ctx, input, by) {
+  const spec = collectionSpecFrom(input);
+  if (collections.length >= COLLECTIONS_MAX) {
+    throw new Error(`\u91C7\u96C6\u914D\u65B9\u5DF2\u7ECF\u6709 ${COLLECTIONS_MAX} \u4E2A\uFF0C\u5148\u5220\u6389\u4E00\u4E9B`);
+  }
+  const now = Date.now();
+  const collection = {
+    id: `c${now.toString(36)}${Math.random().toString(36).slice(2, 5)}`,
+    origin: originOfUrl(spec.url),
+    site: siteOf(spec.url),
+    name: spec.name,
+    url: spec.url,
+    list: spec.list,
+    ...spec.detail ? { detail: spec.detail } : {},
+    createdBy: by,
+    createdAt: now,
+    updatedAt: now,
+    uses: 0,
+    failures: 0
+  };
+  collections = [collection, ...collections];
+  await save(ctx, COLLECTIONS_KEY, collections, "collections");
+  broadcast(ctx, "ui.collectionsChanged", { id: collection.id });
+  return collection;
+}
+__name(addCollection, "addCollection");
+async function updateCollection(ctx, id, input) {
+  const collection = collectionById(id);
+  if (!collection) throw new Error("\u6CA1\u6709\u627E\u5230\u8FD9\u4E2A\u91C7\u96C6\u914D\u65B9");
+  const spec = collectionSpecFrom({
+    name: input.name ?? collection.name,
+    url: input.url ?? collection.url,
+    list: input.list ?? collection.list,
+    detail: input.detail ?? collection.detail
+  });
+  collection.name = spec.name;
+  collection.url = spec.url;
+  collection.origin = originOfUrl(spec.url);
+  collection.site = siteOf(spec.url);
+  collection.list = spec.list;
+  if (spec.detail) collection.detail = spec.detail;
+  else delete collection.detail;
+  collection.updatedAt = Date.now();
+  collection.failures = 0;
+  delete collection.lastError;
+  await save(ctx, COLLECTIONS_KEY, collections, "collections");
+  broadcast(ctx, "ui.collectionsChanged", { id: collection.id });
+  return collection;
+}
+__name(updateCollection, "updateCollection");
+async function removeCollection(ctx, id) {
+  const collection = collectionById(id);
+  if (!collection) throw new Error("\u6CA1\u6709\u627E\u5230\u8FD9\u4E2A\u91C7\u96C6\u914D\u65B9");
+  collections = collections.filter((c) => c !== collection);
+  await save(ctx, COLLECTIONS_KEY, collections, "collections");
+  broadcast(ctx, "ui.collectionsChanged", { id: collection.id });
+  return collection;
+}
+__name(removeCollection, "removeCollection");
+async function recordCollectionRun(ctx, collection, ok, error) {
+  collection.updatedAt = Date.now();
+  if (ok) {
+    collection.uses += 1;
+    collection.lastOk = Date.now();
+    collection.failures = 0;
+    delete collection.lastError;
+  } else {
+    collection.failures += 1;
+    collection.lastError = {
+      at: Date.now(),
+      message: normalizeNoteText(error).slice(0, 300) || "\u5931\u8D25\uFF08\u6CA1\u6709\u8BB0\u5F55\u539F\u56E0\uFF09"
+    };
+  }
+  await save(ctx, COLLECTIONS_KEY, collections, "collections");
+  broadcast(ctx, "ui.collectionsChanged", { id: collection.id });
+}
+__name(recordCollectionRun, "recordCollectionRun");
+async function runCollection(ctx, collection, tid) {
+  const started = Date.now();
+  const tabArg = tid ? { tabId: tid } : {};
+  const go = /* @__PURE__ */ __name(async (url) => {
+    await ctx.call("browser.navigate", { url, ...tabArg }, { timeoutMs: NAVIGATE_TIMEOUT_MS });
+  }, "go");
+  const fail = /* @__PURE__ */ __name((message, list2 = []) => ({
+    ok: false,
+    list: list2,
+    details: [],
+    error: message,
+    ms: Date.now() - started
+  }), "fail");
+  try {
+    await go(collection.url);
+  } catch (err) {
+    return fail(zhError(err instanceof Error ? err.message : String(err)));
+  }
+  if (collection.list.scope) {
+    await waitForSelector(ctx, tid, collection.list.scope);
+  }
+  let list = [];
+  try {
+    const raw = await collectEvaluate(
+      ctx,
+      tid,
+      collectExpression(collection.list.scope, collection.list.fields, collection.list.limit)
+    );
+    list = Array.isArray(raw) ? raw : [];
+  } catch (err) {
+    return fail(`\u8BFB\u53D6\u5217\u8868\u5931\u8D25\uFF1A${describe3(err)}`);
+  }
+  if (list.length === 0) {
+    return fail("\u5217\u8868\u4E00\u6761\u4E5F\u6CA1\u53D6\u5230\uFF1A\u9009\u62E9\u5668\u53EF\u80FD\u5DF2\u7ECF\u5931\u6548");
+  }
+  const details = [];
+  if (collection.detail) {
+    const urls = list.map((row) => row[collection.detail.urlField] ?? "").filter((url) => /^https?:\/\//i.test(url)).slice(0, collection.detail.count);
+    for (const url of urls) {
+      try {
+        await go(url);
+        if (collection.detail.waitFor) {
+          await waitForSelector(ctx, tid, collection.detail.waitFor);
+        }
+        const raw = await collectEvaluate(
+          ctx,
+          tid,
+          collectExpression("", collection.detail.fields, 1)
+        );
+        const rec = Array.isArray(raw) ? raw[0] : void 0;
+        details.push({ url, fields: rec && typeof rec === "object" ? rec : {} });
+      } catch (err) {
+        details.push({ url, fields: { error: describe3(err) } });
+      }
+    }
+    try {
+      await go(collection.url);
+    } catch {
+    }
+  }
+  return { ok: true, list, details, ms: Date.now() - started };
+}
+__name(runCollection, "runCollection");
 function prettyTarget(target) {
   const m = /^alt\(([\s\S]*)\)$/.exec(target);
   if (!m) return target;
@@ -3716,6 +4259,10 @@ function recipeSignature(steps) {
   return steps.map((s) => `${s.kind}:${s.target}`).join("|");
 }
 __name(recipeSignature, "recipeSignature");
+function recipeStepsKey(steps) {
+  return JSON.stringify(steps.map((s) => [s.kind, s.target, s.value ?? "", s.expect ?? ""]));
+}
+__name(recipeStepsKey, "recipeStepsKey");
 function liveRecipes(origin) {
   return recipes.filter((r) => r.origin === origin && r.failures < 2);
 }
@@ -3955,27 +4502,137 @@ async function save(ctx, key, value, what) {
 }
 __name(save, "save");
 async function loadState(ctx) {
-  const [h, f, c, s, r] = await Promise.all([
+  const [h, f, c, s, r, n, rn, w, col] = await Promise.all([
     readKey(ctx, HISTORY_KEY),
     readKey(ctx, FAVORITES_KEY),
     readKey(ctx, CLIPS_KEY),
     readKey(ctx, SETTINGS_KEY),
-    readKey(ctx, RECIPES_KEY)
+    readKey(ctx, RECIPES_KEY),
+    readKey(ctx, SITE_NOTES_KEY),
+    readKey(ctx, SITE_RUNS_KEY),
+    readKey(ctx, WORKFLOWS_KEY),
+    readKey(ctx, COLLECTIONS_KEY)
   ]);
   if (Array.isArray(h)) history = h;
   if (Array.isArray(f)) favorites = f;
   if (Array.isArray(r)) {
-    recipes = r.map((x) => ({
-      ...x,
-      // Old auto-names carried the step count; display adds it, so strip it.
-      name: String(x.name ?? "").replace(/（\d+ 步）\s*$/, ""),
-      site: x.site || siteOf(x.origin),
-      paths: Array.isArray(x.paths) ? x.paths : [],
-      uses: x.uses ?? 0,
-      failures: x.failures ?? 0
-    }));
+    recipes = r.map((x) => {
+      const revisions = Array.isArray(x.revisions) ? x.revisions.filter((v) => v && Array.isArray(v.steps)).map((v) => ({
+        at: Number(v.at) || Date.now(),
+        by: v.by === "agent" ? "agent" : "user",
+        name: String(v.name ?? ""),
+        steps: v.steps
+      })).slice(-NOTE_REVISIONS_MAX) : [];
+      return {
+        ...x,
+        // Old auto-names carried the step count; display adds it, so strip it.
+        name: String(x.name ?? "").replace(/（\d+ 步）\s*$/, ""),
+        site: x.site || siteOf(x.origin),
+        paths: Array.isArray(x.paths) ? x.paths : [],
+        uses: x.uses ?? 0,
+        failures: x.failures ?? 0,
+        ...revisions.length ? { revisions } : {}
+      };
+    });
   }
   if (Array.isArray(c)) clips = c;
+  if (Array.isArray(n)) {
+    siteNotes = n.map((x) => {
+      const revisions = Array.isArray(x.revisions) ? x.revisions.filter((v) => v && typeof v.text === "string").map((v) => ({
+        at: Number(v.at) || Date.now(),
+        by: v.by === "agent" ? "agent" : "user",
+        text: String(v.text),
+        verified: v.verified !== false,
+        enabled: v.enabled !== false
+      })).slice(-NOTE_REVISIONS_MAX) : [];
+      const suspect = x.suspect && typeof x.suspect.reason === "string" ? {
+        at: Number(x.suspect.at) || Date.now(),
+        reason: String(x.suspect.reason),
+        url: String(x.suspect.url ?? "")
+      } : void 0;
+      return {
+        id: String(x.id ?? ""),
+        origin: String(x.origin ?? ""),
+        site: String(x.site ?? "") || siteOf(String(x.origin ?? "")),
+        text: String(x.text ?? ""),
+        by: x.by === "agent" ? "agent" : "user",
+        // Rows from the first build had no `verified`: a user's writing counts
+        // as confirmed; an agent's does not unless it was already marked.
+        verified: typeof x.verified === "boolean" ? x.verified : x.by !== "agent",
+        createdAt: Number(x.createdAt) || Date.now(),
+        updatedAt: Number(x.updatedAt) || Number(x.createdAt) || Date.now(),
+        enabled: x.enabled !== false,
+        ...suspect ? { suspect } : {},
+        ...revisions.length ? { revisions } : {}
+      };
+    }).filter((x) => x.id && x.origin && x.text);
+  }
+  if (Array.isArray(rn)) {
+    runLog = rn.filter((x) => x && x.id && x.origin).map((x) => ({
+      id: String(x.id),
+      at: Number(x.at) || Date.now(),
+      origin: String(x.origin),
+      ok: x.ok === true,
+      steps: Number(x.steps) || 0,
+      failedStep: Number(x.failedStep) || 0,
+      error: typeof x.error === "string" ? x.error.slice(0, 500) : void 0,
+      recipeName: typeof x.recipeName === "string" ? x.recipeName : void 0,
+      injected: Array.isArray(x.injected) ? x.injected.map(String).slice(0, 20) : []
+    })).slice(0, SITE_RUNS_MAX);
+  }
+  if (Array.isArray(w)) {
+    workflows = w.filter((x) => x && x.id && x.name).map((x) => ({
+      id: String(x.id),
+      name: String(x.name).slice(0, 80),
+      steps: normalizeWorkflowSteps(x.steps),
+      createdBy: x.createdBy === "agent" ? "agent" : "user",
+      createdAt: Number(x.createdAt) || Date.now(),
+      updatedAt: Number(x.updatedAt) || Date.now(),
+      uses: Number(x.uses) || 0,
+      ...Number(x.lastOk) ? { lastOk: Number(x.lastOk) } : {},
+      ...x.lastError && typeof x.lastError.message === "string" ? {
+        lastError: {
+          at: Number(x.lastError.at) || Date.now(),
+          message: String(x.lastError.message).slice(0, 300)
+        }
+      } : {},
+      ...Array.isArray(x.revisions) ? { revisions: normalizeWorkflowRevisions(x.revisions) } : {}
+    })).filter((x) => x.steps.length > 0).slice(0, WORKFLOWS_MAX);
+  }
+  if (Array.isArray(col)) {
+    collections = col.filter((x) => x && x.id && x.name && x.url).map((x) => ({
+      id: String(x.id),
+      origin: String(x.origin) || originOfUrl(String(x.url)),
+      site: String(x.site) || siteOf(String(x.url)),
+      name: String(x.name).slice(0, 80),
+      url: String(x.url),
+      list: {
+        scope: String(x.list?.scope ?? ""),
+        fields: normalizeCollectFields(x.list?.fields),
+        limit: Math.min(COLLECT_ROWS_MAX, Math.max(1, Number(x.list?.limit) || 20))
+      },
+      ...x.detail && typeof x.detail.urlField === "string" ? {
+        detail: {
+          urlField: String(x.detail.urlField),
+          fields: normalizeCollectFields(x.detail.fields),
+          ...x.detail.waitFor ? { waitFor: String(x.detail.waitFor) } : {},
+          count: Math.min(COLLECT_DETAIL_MAX, Math.max(1, Number(x.detail.count) || 3))
+        }
+      } : {},
+      createdBy: x.createdBy === "agent" ? "agent" : "user",
+      createdAt: Number(x.createdAt) || Date.now(),
+      updatedAt: Number(x.updatedAt) || Date.now(),
+      uses: Number(x.uses) || 0,
+      ...Number(x.lastOk) ? { lastOk: Number(x.lastOk) } : {},
+      failures: Number(x.failures) || 0,
+      ...x.lastError && typeof x.lastError.message === "string" ? {
+        lastError: {
+          at: Number(x.lastError.at) || Date.now(),
+          message: String(x.lastError.message).slice(0, 300)
+        }
+      } : {}
+    })).filter((x) => x.list.fields.length > 0).slice(0, COLLECTIONS_MAX);
+  }
   const settings = s;
   privateMode = Boolean(settings?.private);
   selPopup = settings?.selPopup !== false;
@@ -4728,6 +5385,8 @@ plugin({
         const id = String(params.id ?? "");
         const target = recipes.find((r) => r.id === id);
         if (!target) return { ok: false, error: "recipe not found" };
+        const beforeName = target.name;
+        const beforeSteps = target.steps.map((s) => ({ ...s }));
         const name = String(params.name ?? "").trim();
         if (name) target.name = name.slice(0, 40);
         if (Array.isArray(params.steps)) {
@@ -4745,6 +5404,31 @@ plugin({
           target.steps = cleaned;
           target.params = cleaned.filter((x) => x.kind === "fill" || x.kind === "select").length;
         }
+        if (beforeName !== target.name || recipeStepsKey(beforeSteps) !== recipeStepsKey(target.steps)) {
+          target.revisions = [
+            ...target.revisions ?? [],
+            { at: Date.now(), by: "user", name: beforeName, steps: beforeSteps }
+          ].slice(-NOTE_REVISIONS_MAX);
+        }
+        target.failures = 0;
+        delete target.lastError;
+        await save(ctx, RECIPES_KEY, recipes, "recipes");
+        broadcast(ctx, "ui.recipesChanged", { recipes });
+        return { ok: true };
+      }
+      case "recipes.restore": {
+        const target = recipes.find((r) => r.id === String(params.id ?? ""));
+        if (!target) return { ok: false, error: "recipe not found" };
+        const at = Number(params.at) || 0;
+        const revision = (target.revisions ?? []).find((r) => r.at === at);
+        if (!revision) return { ok: false, error: "revision not found" };
+        target.revisions = [
+          ...target.revisions ?? [],
+          { at: Date.now(), by: "user", name: target.name, steps: target.steps.map((s) => ({ ...s })) }
+        ].slice(-NOTE_REVISIONS_MAX);
+        target.name = revision.name;
+        target.steps = revision.steps.map((s) => ({ ...s }));
+        target.params = target.steps.filter((x) => x.kind === "fill" || x.kind === "select").length;
         target.failures = 0;
         delete target.lastError;
         await save(ctx, RECIPES_KEY, recipes, "recipes");
@@ -4869,6 +5553,15 @@ plugin({
           favorited = true;
         }
         await save(ctx, FAVORITES_KEY, favorites, "favorites");
+        if (!favorited) {
+          const origin = originOfUrl(url);
+          const before = runLog.length;
+          runLog = runLog.filter((r) => r.origin !== origin);
+          if (runLog.length !== before) {
+            await save(ctx, SITE_RUNS_KEY, runLog, "site runs");
+            broadcast(ctx, "ui.siteRunsChanged", { origin });
+          }
+        }
         broadcast(ctx, "ui.favoritesChanged", { favorites });
         if (url === urlKey(lastUrl)) pushUrl(ctx, lastUrl);
         return { favorited, url };
@@ -4880,6 +5573,132 @@ plugin({
         await save(ctx, FAVORITES_KEY, favorites, "favorites");
         broadcast(ctx, "ui.favoritesChanged", { favorites });
         if (url === urlKey(lastUrl)) pushUrl(ctx, lastUrl);
+        return { ok: true };
+      }
+      case "siteMemory.list": {
+        const url = String(params.url ?? lastUrl ?? "");
+        const origin = originOfUrl(url);
+        return {
+          notes: notesFor(origin),
+          site: siteOf(url),
+          origin,
+          favorited: isFavoriteOrigin(origin)
+        };
+      }
+      case "siteMemory.add": {
+        const url = String(params.url ?? lastUrl ?? "");
+        const note = await addSiteNote(ctx, url, String(params.text ?? ""), "user");
+        return { ok: true, note };
+      }
+      case "siteMemory.update": {
+        const note = await updateSiteNote(
+          ctx,
+          String(params.id ?? ""),
+          {
+            text: params.text,
+            enabled: params.enabled,
+            // The panel is the user's hand: it may confirm a pending note.
+            verified: params.verified
+          },
+          "user"
+        );
+        return { ok: true, note };
+      }
+      case "siteMemory.remove": {
+        await removeSiteNote(ctx, String(params.id ?? ""));
+        return { ok: true };
+      }
+      case "siteMemory.resolve": {
+        const note = await resolveSiteNote(ctx, String(params.id ?? ""));
+        return { ok: true, note };
+      }
+      case "siteMemory.restore": {
+        const note = await restoreSiteNote(
+          ctx,
+          String(params.id ?? ""),
+          Number(params.at) || 0
+        );
+        return { ok: true, note };
+      }
+      case "siteMemory.runs": {
+        const url = String(params.url ?? lastUrl ?? "");
+        const origin = originOfUrl(url);
+        return {
+          runs: runLog.filter((r) => r.origin === origin).slice(0, 20),
+          origin
+        };
+      }
+      // ── Workflows: global, across sites ──
+      case "workflows.list": {
+        return { workflows };
+      }
+      case "workflows.add": {
+        const workflow = await addWorkflow(
+          ctx,
+          String(params.name ?? ""),
+          normalizeWorkflowSteps(params.steps),
+          "user"
+        );
+        return { ok: true, workflow };
+      }
+      case "workflows.update": {
+        const workflow = await updateWorkflow(
+          ctx,
+          String(params.id ?? ""),
+          {
+            ...typeof params.name === "string" ? { name: params.name } : {},
+            ...params.steps !== void 0 ? { steps: normalizeWorkflowSteps(params.steps) } : {}
+          },
+          "user"
+        );
+        return { ok: true, workflow };
+      }
+      case "workflows.remove": {
+        await removeWorkflow(ctx, String(params.id ?? ""));
+        return { ok: true };
+      }
+      case "workflows.restore": {
+        const workflow = await restoreWorkflow(
+          ctx,
+          String(params.id ?? ""),
+          Number(params.at) || 0
+        );
+        return { ok: true, workflow };
+      }
+      /** Everything the memory center shows, in one round trip. */
+      case "memory.overview": {
+        const origins = /* @__PURE__ */ new Set();
+        for (const f of favorites) origins.add(originOfUrl(f.url));
+        for (const n of siteNotes) origins.add(n.origin);
+        const sites = [...origins].filter(Boolean).map((origin) => ({
+          origin,
+          site: siteOf(origin),
+          favorited: isFavoriteOrigin(origin),
+          notes: notesFor(origin),
+          runs: runLog.filter((r) => r.origin === origin).slice(0, 10),
+          collections: collections.filter((c) => c.site === siteOf(origin))
+        })).sort(
+          (a, b) => Number(b.favorited) - Number(a.favorited) || a.site.localeCompare(b.site)
+        );
+        return { sites, workflows, generatedAt: Date.now() };
+      }
+      // ── Collections: deterministic reads ──
+      case "collections.list": {
+        const url = String(params.url ?? lastUrl ?? "");
+        const currentSite = siteOf(url);
+        const found = collections.filter((c) => !currentSite || c.site === currentSite).sort((a, b) => (b.lastOk ?? 0) - (a.lastOk ?? 0));
+        return { collections: found, site: currentSite };
+      }
+      case "collections.run": {
+        const collection = collectionById(String(params.id ?? ""));
+        if (!collection) return { ok: false, error: "\u91C7\u96C6\u914D\u65B9\u5DF2\u7ECF\u4E0D\u5728\u4E86" };
+        const tabId = targetTabId(key) ?? (await ensureTab(ctx, key)).id;
+        const result = await runCollection(ctx, collection, tabId);
+        await recordCollectionRun(ctx, collection, result.ok, result.error ?? "");
+        return { ...result, collection };
+      }
+      case "collections.remove": {
+        await removeCollection(ctx, String(params.id ?? ""));
         return { ok: true };
       }
       case "history.clear":
@@ -4907,7 +5726,7 @@ plugin({
       }
       default:
         throw new Error(
-          `unknown panel method: ${method} (known: nav.open, nav.back, nav.forward, nav.reload, state.get, omnibox.search, favorites.toggle, favorites.remove, history.clear, sel.theme, settings.setPrivate, settings.setSelPopup, tabs.new, tabs.activate, tabs.close, tabs.reorder, split.set, recipes.list, recipes.update, recipes.delete, recipes.run)`
+          `unknown panel method: ${method} (known: nav.open, nav.back, nav.forward, nav.reload, state.get, omnibox.search, favorites.toggle, favorites.remove, history.clear, sel.theme, settings.setPrivate, settings.setSelPopup, tabs.new, tabs.activate, tabs.close, tabs.reorder, split.set, recipes.list, recipes.update, recipes.delete, recipes.run, siteMemory.list, siteMemory.add, siteMemory.update, siteMemory.remove, siteMemory.resolve, siteMemory.restore, siteMemory.runs, recipes.restore, workflows.list, workflows.add, workflows.update, workflows.remove, workflows.restore, collections.list, collections.run, collections.remove, memory.overview)`
         );
     }
   },
@@ -5016,6 +5835,7 @@ plugin({
     }
   },
   async onTool(name, params, ctx, call) {
+    await ensureLoaded(ctx);
     const sessionKey = call?.sessionId ?? null;
     const tid = targetTabId(sessionKey, params.tab);
     const reveal = name === "browser_navigate" || name === "browser_walk" || name === "browser_screenshot" || name === "browser_show" || name === "browser_tab_open" || name === "browser_tab_switch";
@@ -5036,6 +5856,7 @@ plugin({
           throw new Error(zhError(error instanceof Error ? error.message : String(error)));
         }
         const finalUrl = result?.url ?? url;
+        lastUrl = finalUrl;
         const row = bucketFor(bucketKey(sessionKey)).tabs.find((t) => t.id === tab.id);
         if (row) row.url = finalUrl;
         await showEngine(ctx, tab.id, true, sessionKey ?? panelSession);
@@ -5045,23 +5866,36 @@ plugin({
 
 \uFF08\u9875\u9762\u5230 ${(result.slowMs / 1e3).toFixed(1)}s \u624D\u5C31\u7EEA\uFF0C\u7F51\u7EDC\u504F\u6162\uFF0C\u4F46\u5185\u5BB9\u5DF2\u7ECF\u52A0\u8F7D\uFF0C\u53EF\u4EE5\u76F4\u63A5\u7EE7\u7EED\u64CD\u4F5C\u3002\uFF09` : "";
         const head = `\u5DF2\u6253\u5F00 ${finalUrl}${result?.title ? ` \u2014 ${result.title}` : ""}${slowNote}`;
+        const memo = siteMemoryDigest(originOfUrl(finalUrl));
+        const injectKey = `${sessionKey ?? ""}|${originOfUrl(finalUrl)}`;
+        if (memo.ids.length) {
+          lastInjected.set(injectKey, { ids: memo.ids, at: Date.now() });
+        } else {
+          lastInjected.delete(injectKey);
+        }
+        const compose = /* @__PURE__ */ __name((body) => {
+          const parts = [head];
+          if (body) parts.push(body);
+          if (memo.text) parts.push(memo.text);
+          return parts.join("\n\n");
+        }, "compose");
         if (result?.page?.authKind === "captcha") {
-          return `${head}
-
-\u26A0\uFE0F \u8FD9\u4E2A\u9875\u9762\u9700\u8981\u4EBA\u5DE5\u5B8C\u6210\u4EBA\u673A\u9A8C\u8BC1\u3002\u8BF7\u5728\u53F3\u4FA7\u6D4F\u89C8\u5668\u9762\u677F\u91CC\u7531\u7528\u6237\u5B8C\u6210\uFF1B\u4E0D\u8981\u5C1D\u8BD5\u70B9\u51FB\u6216\u7ED5\u8FC7\u3002\u7528\u6237\u5B8C\u6210\u540E\u518D\u7EE7\u7EED\u3002`;
+          return compose(
+            "\u26A0\uFE0F \u8FD9\u4E2A\u9875\u9762\u9700\u8981\u4EBA\u5DE5\u5B8C\u6210\u4EBA\u673A\u9A8C\u8BC1\u3002\u8BF7\u5728\u53F3\u4FA7\u6D4F\u89C8\u5668\u9762\u677F\u91CC\u7531\u7528\u6237\u5B8C\u6210\uFF1B\u4E0D\u8981\u5C1D\u8BD5\u70B9\u51FB\u6216\u7ED5\u8FC7\u3002\u7528\u6237\u5B8C\u6210\u540E\u518D\u7EE7\u7EED\u3002"
+          );
         }
         if (result?.page?.authKind === "login") {
-          return `${head}
-
-\u26A0\uFE0F \u8FD9\u662F\u4E00\u4E2A\u767B\u5F55\u9875\u3002\u767B\u5F55\u5FC5\u987B\u7531\u7528\u6237\u5B8C\u6210\uFF08\u8D26\u53F7\u5BC6\u7801\u3001\u77ED\u4FE1\u9A8C\u8BC1\u7801\u3001\u626B\u7801\u90FD\u4E0D\u662F agent \u8BE5\u505A\u7684\uFF09\u3002\u8BF7\u5728\u53F3\u4FA7\u9762\u677F\u91CC\u7531\u7528\u6237\u767B\u5F55\uFF0C\u5B8C\u6210\u540E\u518D\u7EE7\u7EED\u3002`;
+          return compose(
+            "\u26A0\uFE0F \u8FD9\u662F\u4E00\u4E2A\u767B\u5F55\u9875\u3002\u767B\u5F55\u5FC5\u987B\u7531\u7528\u6237\u5B8C\u6210\uFF08\u8D26\u53F7\u5BC6\u7801\u3001\u77ED\u4FE1\u9A8C\u8BC1\u7801\u3001\u626B\u7801\u90FD\u4E0D\u662F agent \u8BE5\u505A\u7684\uFF09\u3002\u8BF7\u5728\u53F3\u4FA7\u9762\u677F\u91CC\u7531\u7528\u6237\u767B\u5F55\uFF0C\u5B8C\u6210\u540E\u518D\u7EE7\u7EED\u3002"
+          );
         }
         const here = pathOf(finalUrl);
         const nearby = liveRecipes(originOfUrl(finalUrl)).map((r) => ({ r, rank: pathRank(r, here) })).sort((x, y) => x.rank - y.rank || y.r.lastOk - x.r.lastOk).slice(0, 5);
-        if (nearby.length === 0) return head;
+        if (nearby.length === 0) return compose("");
         const where = /* @__PURE__ */ __name((rank) => rank === 0 ? "\uFF0C\u672C\u9875" : rank === 1 ? "\uFF0C\u540C\u680F\u76EE" : "", "where");
-        return `${head}
-
-\u672C\u7AD9\u6709 ${nearby.length} \u4E2A\u5DF2\u8BB0\u5F55\u7684\u5FEB\u6377\u64CD\u4F5C\uFF1A${nearby.map(({ r, rank }) => `${r.name}\uFF08${r.steps.length} \u6B65${where(rank)}\uFF09`).join("\u3001")}\u3002\u7528 browser_recipes \u67E5\u770B\u6B65\u9AA4\uFF0C\u518D\u6309 browser_act \u6267\u884C\uFF1B\u67D0\u4E00\u6B65\u7684\u9884\u671F\u5BF9\u4E0D\u4E0A\u5C31\u505C\u4E0B\u81EA\u5DF1\u64CD\u4F5C\u3002`;
+        return compose(
+          `\u672C\u7AD9\u6709 ${nearby.length} \u4E2A\u5DF2\u8BB0\u5F55\u7684\u5FEB\u6377\u64CD\u4F5C\uFF1A${nearby.map(({ r, rank }) => `${r.name}\uFF08${r.steps.length} \u6B65${where(rank)}\uFF09`).join("\u3001")}\u3002\u7528 browser_recipes \u67E5\u770B\u6B65\u9AA4\uFF0C\u518D\u6309 browser_act \u6267\u884C\uFF1B\u67D0\u4E00\u6B65\u7684\u9884\u671F\u5BF9\u4E0D\u4E0A\u5C31\u505C\u4E0B\u81EA\u5DF1\u64CD\u4F5C\u3002`
+        );
       }
       case "browser_tab_list": {
         const b = bucketFor(bucketKey(sessionKey));
@@ -5212,6 +6046,19 @@ plugin({
             creditedId
           );
         }
+        const runOrigin = originOfUrl(state?.url ?? "");
+        const injection = lastInjected.get(`${sessionKey ?? ""}|${runOrigin}`);
+        const injectedIds = injection && Date.now() - injection.at < INJECTION_TTL_MS ? injection.ids : [];
+        await recordRun(ctx, {
+          at: Date.now(),
+          origin: runOrigin,
+          ok: failedAt < 0,
+          steps: steps.length,
+          failedStep: failedAt < 0 ? 0 : failedAt + 1,
+          ...failedAt >= 0 ? { error: failMsg } : {},
+          ...recipeName ? { recipeName } : {},
+          injected: injectedIds
+        });
         const head = failedAt < 0 ? `\u5DF2\u5B8C\u6210 ${steps.length} \u6B65` : `\u7B2C ${failedAt + 1} \u6B65\u5931\u8D25\uFF0C\u4E4B\u540E ${steps.length - failedAt - 1} \u6B65\u6CA1\u6709\u6267\u884C`;
         const lines = [
           head,
@@ -5224,7 +6071,8 @@ plugin({
 \u2026(\u5FEB\u7167\u5DF2\u622A\u65AD,\u8981\u627E\u5177\u4F53\u5143\u7D20\u7528 browser_find)` : state.snapshot;
           lines.push("", "\u53EF\u4EA4\u4E92\u5143\u7D20:", snap);
         }
-        return lines.join("\n");
+        const hint = failedAt < 0 ? memoryLearningHint(sessionKey, originOfUrl(state?.url ?? ""), steps.length) : "";
+        return lines.join("\n") + hint;
       }
       case "browser_click": {
         const selector = String(params.selector ?? "").trim();
@@ -5380,8 +6228,197 @@ plugin({
         if (favorites.length === 0) {
           return "\u7528\u6237\u8FD8\u6CA1\u6709\u6536\u85CF\u4EFB\u4F55\u7F51\u7AD9(\u6D4F\u89C8\u5668\u9762\u677F\u5730\u5740\u680F\u5DE6\u8FB9\u7684\u661F\u6807\u6309\u94AE\u53EF\u4EE5\u6536\u85CF)\u3002";
         }
-        return favorites.map((f, i) => `${i + 1}. ${f.title || "(\u65E0\u6807\u9898)"}
-   ${f.url}`).join("\n");
+        return favorites.map((f, i) => {
+          const count = liveNotes(originOfUrl(f.url)).length;
+          return `${i + 1}. ${f.title || "(\u65E0\u6807\u9898)"}
+   ${f.url}${count ? ` \xB7 \u672C\u7AD9\u8BB0\u5FC6 ${count} \u6761` : ""}`;
+        }).join("\n");
+      }
+      /**
+       * The user's own long-term writing about a site. This tool reads it, and
+       * writes ONLY on request ("记住……"): memory the model invents is
+       * worse than none, because it outlives the turn that invented it.
+       */
+      case "browser_site_memory": {
+        const action = String(params.action ?? "list").trim();
+        const rawUrl = String(params.url ?? "").trim();
+        const url = rawUrl ? normalizeUrl(rawUrl) : lastUrl;
+        const origin = originOfUrl(url);
+        if (!origin) throw new Error("\u8FD8\u6CA1\u6709\u6253\u5F00\u7684\u7F51\u9875\uFF1A\u5148 browser_navigate\uFF0C\u6216\u4F20 url");
+        const mine = notesFor(origin);
+        const site = siteOf(url) || origin;
+        const favorited = isFavoriteOrigin(origin);
+        if (action === "list") {
+          if (mine.length === 0) {
+            return `\u7528\u6237\u8FD8\u6CA1\u6709\u7ED9 ${site} \u5199\u8FC7\u672C\u7AD9\u8BB0\u5FC6\u3002` + (favorited ? '\u53EF\u4EE5\u5728\u6D4F\u89C8\u5668\u9762\u677F\u5730\u5740\u680F\u4E0B\u62C9\u7684\u300C\u672C\u7AD9\u8BB0\u5FC6\u300D\u91CC\u5199\uFF1B\u4ED6\u660E\u786E\u8BA9\u4F60\u8BB0\u65F6\uFF0C\u4E5F\u53EF\u4EE5\u7528 action:"add" \u8BB0\u4E00\u6761\u3002' : "\uFF08\u672C\u7AD9\u672A\u6536\u85CF\uFF0C\u5199\u4E86\u6682\u65F6\u4E5F\u4E0D\u4F1A\u63D0\u4F9B\u7ED9\u4F60\u3002\uFF09");
+          }
+          return `\u672C\u7AD9\u8BB0\u5FC6 \xB7 ${site} \xB7 ${mine.length} \u6761` + (favorited ? "\uFF08\u5DF2\u6536\u85CF\uFF0C\u5BFC\u822A\u5230\u672C\u7AD9\u65F6\u4F1A\u81EA\u52A8\u63D0\u4F9B\uFF09" : "\uFF08\u672C\u7AD9\u672A\u6536\u85CF\uFF0C\u4E0D\u4F1A\u81EA\u52A8\u63D0\u4F9B\uFF09") + "\n" + mine.map((n, i) => {
+            const state = n.suspect ? "\uFF08\u53EF\u7591\uFF1AAI \u62A5\u544A\u4E0E\u9875\u9762\u4E0D\u7B26\uFF0C\u6682\u505C\u63D0\u4F9B\uFF09" : n.enabled === false ? "\uFF08\u5DF2\u505C\u7528\uFF09" : n.verified === false ? "\uFF08\u5F85\u786E\u8BA4\uFF09" : "";
+            const by = n.by === "agent" ? "\uFF08AI \u8BB0\u7684\uFF09" : "";
+            return `${i + 1}. [${n.id}] ${n.text}${state}${by}`;
+          }).join("\n") + "\n\n\u8FD9\u4E9B\u662F\u7528\u6237\u6C89\u6DC0\u7684\u957F\u671F\u77E5\u8BC6\uFF0C\u4E0D\u662F\u9875\u9762\u5B9E\u65F6\u72B6\u6001\uFF1B\u4E0E\u9875\u9762\u4E0D\u7B26\u65F6\u4EE5\u9875\u9762\u4E3A\u51C6\uFF0C\u7528 dispute \u62A5\u544A\u54EA\u6761\u4E0D\u5BF9\uFF08\u5B83\u4F1A\u88AB\u6807\u4E3A\u53EF\u7591\u3001\u6682\u505C\u63D0\u4F9B\uFF09\u3002" + (mine.some((n) => n.verified === false) ? "\u6807\u7740\u300C\u5F85\u786E\u8BA4\u300D\u7684\u662F\u4F60\u81EA\u5DF1\u89C2\u5BDF\u5230\u3001\u7528\u6237\u8FD8\u6CA1\u786E\u8BA4\u7684\uFF0C\u5F15\u7528\u65F6\u8981\u8BF4\u660E\u3002" : "");
+        }
+        if (action === "add") {
+          const note = await addSiteNote(ctx, url, String(params.text ?? ""), "agent");
+          return `\u5DF2\u8BB0\u4E3A\u5F85\u786E\u8BA4\uFF08${site}\uFF0C\u7B2C ${mine.length + 1} \u6761\uFF09\uFF1A${note.text}` + (favorited ? "\u3002\u4E0B\u6B21\u8FDB\u5165\u672C\u7AD9\u4F1A\u5E26\u4E0A\uFF0C\u4F46\u6807\u6CE8\u4E3A\u672A\u786E\u8BA4\uFF1B\u7528\u6237\u5728\u9762\u677F\u91CC\u786E\u8BA4\u540E\u624D\u8F6C\u6B63\u3002" : "\u3002\u672C\u7AD9\u8FD8\u6CA1\u88AB\u6536\u85CF\uFF0C\u6536\u85CF\u540E\u624D\u4F1A\u5E26\u4E0A\u3002");
+        }
+        if (action === "update") {
+          const id = String(params.id ?? "").trim();
+          const target = mine.find((n) => n.id === id);
+          if (!target) throw new Error(`\u672C\u7AD9\u6CA1\u6709\u8FD9\u6761\u8BB0\u5FC6\uFF1A${id || "\uFF08\u7F3A id\uFF09"}`);
+          if (target.verified !== false) {
+            throw new Error(
+              "\u8FD9\u6761\u8BB0\u5FC6\u7528\u6237\u5DF2\u7ECF\u786E\u8BA4\u8FC7\uFF0C\u53EA\u6709\u7528\u6237\u81EA\u5DF1\u80FD\u6539\uFF1B\u8981\u4FEE\u8BA2\u5C31\u7528 add \u8BB0\u4E00\u6761\u65B0\u7684\u5019\u9009\uFF0C\u5E76\u5728\u56DE\u590D\u91CC\u8BF4\u660E"
+            );
+          }
+          if (target.suspect) throw new Error("\u8FD9\u6761\u8BB0\u5FC6\u5DF2\u88AB\u6807\u4E3A\u53EF\u7591\uFF0C\u7B49\u7528\u6237\u5728\u9762\u677F\u91CC\u5904\u7406");
+          const note = await updateSiteNote(
+            ctx,
+            id,
+            { text: params.text, enabled: params.enabled },
+            "agent"
+          );
+          return `\u5DF2\u66F4\u65B0\u8BB0\u5FC6 [${note.id}]\uFF1A${note.text}${note.enabled === false ? "\uFF08\u5DF2\u505C\u7528\uFF09" : ""}`;
+        }
+        if (action === "dispute") {
+          const id = String(params.id ?? "").trim();
+          const target = mine.find((n) => n.id === id);
+          if (!target) throw new Error(`\u672C\u7AD9\u6CA1\u6709\u8FD9\u6761\u8BB0\u5FC6\uFF1A${id || "\uFF08\u7F3A id\uFF09"}`);
+          const note = await disputeSiteNote(ctx, id, String(params.reason ?? ""), url);
+          return `\u5DF2\u628A\u8FD9\u6761\u8BB0\u5FC6\u6807\u4E3A\u53EF\u7591\u3001\u6682\u505C\u63D0\u4F9B\uFF1A${note.text}
+\u539F\u56E0\uFF1A${note.suspect?.reason}
+\u7528\u6237\u4F1A\u5728\u9762\u677F\u91CC\u786E\u8BA4\u6216\u4FEE\u6B63\uFF1B\u73B0\u5728\u8BF7\u6309\u9875\u9762\u5B9E\u9645\u60C5\u51B5\u81EA\u5DF1\u64CD\u4F5C\uFF0C\u5E76\u5728\u56DE\u590D\u91CC\u8BF4\u660E\u3002`;
+        }
+        if (action === "remove") {
+          const id = String(params.id ?? "").trim();
+          const target = mine.find((n) => n.id === id);
+          if (!target) throw new Error(`\u672C\u7AD9\u6CA1\u6709\u8FD9\u6761\u8BB0\u5FC6\uFF1A${id || "\uFF08\u7F3A id\uFF09"}`);
+          if (target.verified !== false) {
+            throw new Error("\u8FD9\u6761\u8BB0\u5FC6\u7528\u6237\u5DF2\u7ECF\u786E\u8BA4\u8FC7\uFF0C\u53EA\u6709\u7528\u6237\u81EA\u5DF1\u80FD\u5220");
+          }
+          const note = await removeSiteNote(ctx, id);
+          return `\u5DF2\u5220\u9664\u8FD9\u6761\u8BB0\u5FC6\uFF1A${note.text}`;
+        }
+        throw new Error(`\u672A\u77E5 action\uFF1A${action}\uFF08list / add / update / dispute / remove\uFF09`);
+      }
+      /**
+       * Cross-site routines the user repeats. A workflow is a readable
+       * checklist pointing at sites and recipes — the agent still drives each
+       * step, so nothing here can bypass a login or a confirmation gate.
+       */
+      case "browser_workflow": {
+        const action = String(params.action ?? "list").trim();
+        if (action === "list") {
+          if (workflows.length === 0) {
+            return "\u8FD8\u6CA1\u6709\u4FDD\u5B58\u4EFB\u4F55\u8DE8\u7F51\u7AD9\u5DE5\u4F5C\u6D41\u3002\u7528\u6237\u8BF4\u300C\u8BB0\u4F4F\u8FD9\u5957\u6D41\u7A0B\u300D\u65F6\uFF0C\u53EF\u4EE5\u7528 add \u628A\u6B65\u9AA4\u8BB0\u4E0B\u6765\uFF08\u6BCF\u6B65\u4E00\u53E5\u8BDD\uFF0C\u6CE8\u660E\u7F51\u7AD9/\u914D\u65B9\uFF09\u3002";
+          }
+          return workflows.map((w, i) => {
+            const lines = w.steps.map(
+              (s, j) => `  ${j + 1}. ${s.site ? `[${s.site}] ` : ""}${s.text}${s.recipe ? `\uFF08\u7528\u914D\u65B9\u300C${s.recipe}\u300D\uFF09` : ""}`
+            );
+            const meta = `\u7528\u8FC7 ${w.uses} \u6B21` + (w.lastOk ? `\uFF0C\u4E0A\u6B21\u6210\u529F ${formatWhen(w.lastOk)}` : "") + (w.lastError ? `\uFF1B\u4E0A\u6B21\u5931\u8D25 ${formatWhen(w.lastError.at)}\uFF1A${w.lastError.message}` : "");
+            return `${i + 1}. [${w.id}] ${w.name}\uFF08${w.steps.length} \u6B65 \xB7 ${meta}\uFF09
+${lines.join("\n")}`;
+          }).join("\n\n") + '\n\n\u6309\u987A\u5E8F\u6267\u884C\uFF0C\u6BCF\u4E00\u6B65\u7528\u5BF9\u5E94\u7F51\u7AD9\u7684\u914D\u65B9\u6216 browser_act\uFF1B\u505A\u5B8C\u7528 action:"mark" \u62A5\u544A\u7ED3\u679C\uFF08ok\u3001error\uFF09\u3002\u5DE5\u4F5C\u6D41\u53EA\u662F\u6E05\u5355\uFF0C\u771F\u6B63\u64CD\u4F5C\u4ECD\u8D70\u6B63\u5E38\u5DE5\u5177\u2014\u2014\u767B\u5F55\u3001\u9A8C\u8BC1\u7801\u3001\u786E\u8BA4\u6846\u4ECD\u7136\u4EA4\u7ED9\u7528\u6237\u3002';
+        }
+        if (action === "add") {
+          const workflow = await addWorkflow(
+            ctx,
+            String(params.name ?? ""),
+            normalizeWorkflowSteps(params.steps),
+            "agent"
+          );
+          return `\u5DF2\u4FDD\u5B58\u5DE5\u4F5C\u6D41\u300C${workflow.name}\u300D\uFF08${workflow.steps.length} \u6B65\uFF09\u3002\u7528\u6237\u53EF\u4EE5\u5728\u8BB0\u5FC6\u4E2D\u5FC3\u91CC\u6838\u5BF9\u548C\u4FEE\u6539\u3002`;
+        }
+        if (action === "update") {
+          const workflow = await updateWorkflow(
+            ctx,
+            String(params.id ?? ""),
+            {
+              ...typeof params.name === "string" ? { name: params.name } : {},
+              ...params.steps !== void 0 ? { steps: normalizeWorkflowSteps(params.steps) } : {}
+            },
+            "agent"
+          );
+          return `\u5DF2\u66F4\u65B0\u5DE5\u4F5C\u6D41\u300C${workflow.name}\u300D\u3002`;
+        }
+        if (action === "remove") {
+          const workflow = await removeWorkflow(ctx, String(params.id ?? ""));
+          return `\u5DF2\u5220\u9664\u5DE5\u4F5C\u6D41\u300C${workflow.name}\u300D\u3002`;
+        }
+        if (action === "mark") {
+          const workflow = await markWorkflow(
+            ctx,
+            String(params.id ?? ""),
+            params.ok === true,
+            String(params.error ?? "")
+          );
+          return `\u5DF2\u8BB0\u5F55\uFF1A\u5DE5\u4F5C\u6D41\u300C${workflow.name}\u300D${params.ok === true ? "\u6210\u529F" : "\u5931\u8D25"}\uFF08\u7B2C ${workflow.uses} \u6B21\u4F7F\u7528\uFF09\u3002`;
+        }
+        throw new Error(`\u672A\u77E5 action\uFF1A${action}\uFF08list / add / update / remove / mark\uFF09`);
+      }
+      /**
+       * Deterministic reading recipes. A collection stores where to look, not
+       * what was there: every run reads the page fresh and returns only the
+       * named fields, so no page snapshot ever reaches the model.
+       */
+      case "browser_collect": {
+        const action = String(params.action ?? "list").trim();
+        const by = "agent";
+        if (action === "list") {
+          if (collections.length === 0) {
+            return "\u8FD8\u6CA1\u6709\u91C7\u96C6\u914D\u65B9\u3002\u5148\u6D4F\u89C8\u9875\u9762\u3001\u7528 browser_evaluate \u9A8C\u8BC1\u9009\u62E9\u5668\uFF0C\u518D\u628A\u300C\u6253\u5F00\u54EA\u4E2A\u9875\u9762\u3001\u53D6\u54EA\u4E9B\u5B57\u6BB5\u300D\u7528 add \u8BB0\u4E0B\u6765\u3002";
+          }
+          return collections.map((c, i) => {
+            const fields = c.list.fields.map((f) => f.key).join(" / ");
+            const detailFields = c.detail ? `\uFF0C\u8FDB\u524D ${c.detail.count} \u6761\u53D6 ${c.detail.fields.map((f) => f.key).join(" / ")}` : "";
+            const status = c.failures >= 2 ? " [\u5DF2\u5931\u6548]" : c.lastError ? ` [\u4E0A\u6B21\u5931\u8D25\uFF1A${c.lastError.message}]` : c.lastOk ? ` [\u4E0A\u6B21\u6210\u529F ${formatWhen(c.lastOk)}]` : "";
+            return `${i + 1}. [${c.id}] ${c.name}\uFF08${c.site} \xB7 \u5217\u8868\u53D6 ${fields}${detailFields} \xB7 \u7528\u8FC7 ${c.uses} \u6B21\uFF09${status}
+   ${c.url}`;
+          }).join("\n") + '\n\n\u7528 action:"run" \u548C id \u8FD0\u884C\uFF1A\u5B83\u5728\u6D4F\u89C8\u5668\u91CC\u771F\u5B9E\u5BFC\u822A\u5E76\u53EA\u8FD4\u56DE\u8FD9\u4E9B\u5B57\u6BB5\uFF0C\u4E0D\u4EA7\u751F\u9875\u9762\u5FEB\u7167\u3002\u8BFB\u89C4\u5219\uFF1A\u5217\u8868\u5B57\u6BB5\u53D6\u4E0D\u5230\u5C31\u505C\u4E0B\u68C0\u67E5\u9009\u62E9\u5668\uFF1B\u8FDE\u7EED\u5931\u8D25\u4E24\u6B21\u4F1A\u6807\u4E3A\u5931\u6548\u3002';
+        }
+        if (action === "add") {
+          const collection = await addCollection(ctx, params, by);
+          return `\u5DF2\u4FDD\u5B58\u91C7\u96C6\u914D\u65B9\u300C${collection.name}\u300D\uFF08${collection.site}\uFF09\uFF1A\u5217\u8868 ${collection.list.fields.map((f) => f.key).join(" / ")}${collection.detail ? `\uFF0C\u8FDB\u524D ${collection.detail.count} \u6761\u53D6 ${collection.detail.fields.map((f) => f.key).join(" / ")}` : ""}\u3002
+\u7ACB\u523B\u7528 action:"run" id:"${collection.id}" \u8DD1\u4E00\u6B21\u9A8C\u8BC1\uFF1B\u53D6\u4E0D\u5230\u6570\u636E\u5C31 update \u9009\u62E9\u5668\uFF0C\u4E0D\u8981\u7559\u7740\u574F\u914D\u65B9\u3002\u7528\u6237\u53EF\u4EE5\u5728\u6D4F\u89C8\u5668\u5730\u5740\u680F\u4E0B\u62C9\u7684\u300C\u91C7\u96C6\u300D\u91CC\u4E00\u952E\u8FD0\u884C\u548C\u5220\u9664\u3002`;
+        }
+        if (action === "update") {
+          const collection = await updateCollection(ctx, String(params.id ?? ""), params);
+          return `\u5DF2\u66F4\u65B0\u91C7\u96C6\u914D\u65B9\u300C${collection.name}\u300D\u3002\u5EFA\u8BAE\u518D run \u4E00\u6B21\u9A8C\u8BC1\u3002`;
+        }
+        if (action === "remove") {
+          const collection = await removeCollection(ctx, String(params.id ?? ""));
+          return `\u5DF2\u5220\u9664\u91C7\u96C6\u914D\u65B9\u300C${collection.name}\u300D\u3002`;
+        }
+        if (action === "run") {
+          const collection = collectionById(String(params.id ?? ""));
+          if (!collection) throw new Error("\u6CA1\u6709\u627E\u5230\u8FD9\u4E2A\u91C7\u96C6\u914D\u65B9");
+          const tab = tid ? { id: tid } : await ensureTab(ctx, bucketKey(sessionKey));
+          const result = await runCollection(ctx, collection, tab.id);
+          await recordCollectionRun(ctx, collection, result.ok, result.error ?? "");
+          if (!result.ok) {
+            return `\u91C7\u96C6\u300C${collection.name}\u300D\u5931\u8D25\uFF1A${result.error}
+\u68C0\u67E5\u4E00\u4E0B\u9875\u9762\u7ED3\u6784\u662F\u5426\u53D8\u4E86\uFF1B\u5FC5\u8981\u65F6\u7528 update \u4FEE\u9009\u62E9\u5668\uFF0C\u6216\u8005\u5220\u6389\u8FD9\u6761\u3002`;
+          }
+          const lines = [
+            `\u91C7\u96C6\u300C${collection.name}\u300D\uFF1A${result.list.length} \u6761\uFF0C${(result.ms / 1e3).toFixed(1)}s\uFF08\u53EA\u8FD4\u56DE\u5B57\u6BB5\uFF0C\u6CA1\u6709\u9875\u9762\u5FEB\u7167\uFF09`
+          ];
+          result.list.slice(0, 30).forEach((row, i) => {
+            const line = Object.entries(row).map(([k, v]) => v ? `${k}: ${String(v).slice(0, 200)}` : "").filter(Boolean).join(" \xB7 ");
+            lines.push(`${i + 1}. ${line}`);
+          });
+          if (result.details.length) {
+            lines.push("", "\u8BE6\u60C5\uFF1A");
+            for (const d of result.details) {
+              lines.push(`- ${d.url}`);
+              for (const [k, v] of Object.entries(d.fields)) {
+                lines.push(`  ${k}: ${String(v).slice(0, 300)}`);
+              }
+            }
+          }
+          return lines.join("\n").slice(0, 12e3);
+        }
+        throw new Error(`\u672A\u77E5 action\uFF1A${action}\uFF08list / add / update / remove / run\uFF09`);
       }
       /**
        * The only way a result reaches the user's selection popup. The user

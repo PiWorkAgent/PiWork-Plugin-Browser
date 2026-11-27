@@ -2,7 +2,7 @@
   "id": "com.pi.browser",
   "name": "浏览器自动化",
   "description": "给 agent 的浏览器工具:打开网页、读页面结构、点击、填表、滚动、截图、按目标自动导航;面板地址栏带收藏和历史;网页里划词弹出复合框(引用标签 + 问题输入框,翻译/解释/朗读/收藏,回车把问题连同引用发送到对话),翻译与解释由 agent 完成后回显在框内。整页翻译在工具栏一行完成;整页解释与整页分析把正文交给对话里的 agent,答案就在对话里。面板内嵌宿主浏览器引擎视图(地址栏归插件,引擎与登录态归宿主)。",
-  "version": "0.10.0",
+  "version": "0.15.0",
   "apiVersion": 3,
   "engines": {
     "pi-desktop": ">=0.1.0"
@@ -24,6 +24,15 @@
         "keepAlive": "lru",
         "scope": "session",
         "multiInstance": true
+      },
+      {
+        "id": "memory",
+        "title": "记忆中心",
+        "icon": "knowledge",
+        "entry": "./ui/memory.html",
+        "keepAlive": "lru",
+        "scope": "global",
+        "multiInstance": false
       }
     ],
     "tools": [
@@ -118,10 +127,211 @@
       },
       {
         "name": "browser_favorites_list",
-        "description": "List the sites the user starred in the browser panel. Use it to resolve \"打开我常用的那个网站\" into a real URL, or to see which sites the user cares about before navigating.",
+        "description": "List the sites the user starred in the browser panel. Use it to resolve \"打开我常用的那个网站\" into a real URL, or to see which sites the user cares about before navigating. A site with notes shows its memory count.",
         "inputSchema": {
           "type": "object",
           "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "browser_site_memory",
+        "description": "Read or edit the user's long-term memory for a site: what the site is for, where things live, what to avoid. The user writes these in the browser panel; browser_navigate already injects them for favorited sites. Use action \"list\" to read them before complex work. Action \"add\" stores ONE sentence when the user asks you to remember something, or when a finished multi-step run on a favorited site taught you a verifiable fact — it is created as PENDING and only becomes confirmed knowledge when the user approves it in the panel; unconfirmed notes are injected with an explicit (AI 观察，未确认) label. If the page contradicts a note, use action \"dispute\" with that note's id and a reason: the note is paused as 可疑 and the user decides; do not edit or delete around it. You may update / remove only your own unconfirmed notes: a note the user confirmed is theirs, and editing it is refused. Never write memory on your own initiative beyond that, and never treat memory as live page state: the page wins, and you tell the user which note is wrong.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "list",
+                "add",
+                "update",
+                "dispute",
+                "remove"
+              ],
+              "description": "list (default) reads the notes; add / update / dispute / remove act on them."
+            },
+            "text": {
+              "type": "string",
+              "description": "The one sentence to store (add), or the replacement text (update)."
+            },
+            "reason": {
+              "type": "string",
+              "description": "dispute only: how the page contradicts the note, in one sentence."
+            },
+            "id": {
+              "type": "string",
+              "description": "Note id from list (update / remove)."
+            },
+            "enabled": {
+              "type": "boolean",
+              "description": "false pauses a note so it is no longer injected; true resumes it."
+            },
+            "url": {
+              "type": "string",
+              "description": "The page or site to read/write; defaults to the current page."
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "browser_workflow",
+        "description": "The user's saved routines that span sites (export here, import there). A workflow is a readable checklist of steps, each optionally naming a site and a saved recipe; it is NOT executable code and never bypasses a page's login or confirmation. Use action \"list\" when the user refers to a recurring routine (\"按每周订单同步走\") or asks what routines exist. Use \"add\" / \"update\" / \"remove\" only when the user asks you to remember or change one, and \"mark\" after running one to record the outcome. Every workflow is visible and editable in the memory center.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": ["list", "add", "update", "remove", "mark"],
+              "description": "list (default) reads; add / update / remove change the routines; mark records a run's outcome."
+            },
+            "id": {
+              "type": "string",
+              "description": "Workflow id from list (update / remove / mark)."
+            },
+            "name": {
+              "type": "string",
+              "description": "The routine's name, e.g. \"每周订单同步\" (add / update)."
+            },
+            "steps": {
+              "type": "array",
+              "description": "For add / update: the routine in order, one short sentence per step.",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "text": {
+                    "type": "string",
+                    "description": "What to do in this step."
+                  },
+                  "site": {
+                    "type": "string",
+                    "description": "Origin or domain this step happens on, e.g. admin.shopify.com."
+                  },
+                  "recipe": {
+                    "type": "string",
+                    "description": "Optional saved recipe name to use on that site."
+                  }
+                },
+                "required": ["text"],
+                "additionalProperties": false
+              }
+            },
+            "ok": {
+              "type": "boolean",
+              "description": "mark only: whether the run succeeded."
+            },
+            "error": {
+              "type": "string",
+              "description": "mark only: what failed, when ok is false."
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "browser_collect",
+        "description": "Run a saved deterministic reading recipe (a collection): open a fixed URL, extract named fields from a list, and optionally open the first few items to extract detail fields. Returns ONLY the stored fields as compact data — never a page snapshot — so recurring reads cost almost nothing and need no re-analysis. Use it for stable, structured pages read repeatedly (a trending list, a dashboard, a table). Create one only after verifying selectors on the live page with browser_evaluate, and run it once after adding to prove it works. Health: two failed runs mark it stale; fix with update or remove it. Read-only: it navigates and extracts, never clicks or submits.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": ["list", "add", "update", "remove", "run"],
+              "description": "list (default) reads the saved recipes; add / update / remove manage them; run executes one and returns its data."
+            },
+            "id": {
+              "type": "string",
+              "description": "Collection id from list (update / remove / run)."
+            },
+            "name": {
+              "type": "string",
+              "description": "A short name, e.g. \"每日趋势\" (add / update)."
+            },
+            "url": {
+              "type": "string",
+              "description": "The page the run opens first (add / update)."
+            },
+            "list": {
+              "type": "object",
+              "description": "How to read the list page.",
+              "properties": {
+                "scope": {
+                  "type": "string",
+                  "description": "CSS selector for one row; empty means one record from the whole page."
+                },
+                "fields": {
+                  "type": "array",
+                  "description": "Fields to extract from each row.",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "key": {
+                        "type": "string",
+                        "description": "Output name, e.g. \"name\"."
+                      },
+                      "selector": {
+                        "type": "string",
+                        "description": "CSS within the row; empty means the row itself."
+                      },
+                      "attr": {
+                        "type": "string",
+                        "description": "\"text\" (default), \"href\", or an attribute name."
+                      }
+                    },
+                    "required": ["key"],
+                    "additionalProperties": false
+                  }
+                },
+                "limit": {
+                  "type": "number",
+                  "description": "Rows to return at most (1–50, default 20)."
+                }
+              },
+              "required": ["fields"],
+              "additionalProperties": false
+            },
+            "detail": {
+              "type": "object",
+              "description": "Optional: open the first few rows and read fields on each page.",
+              "properties": {
+                "urlField": {
+                  "type": "string",
+                  "description": "Which list field holds the item URL, e.g. \"link\"."
+                },
+                "fields": {
+                  "type": "array",
+                  "description": "Fields to extract on each opened page.",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "key": {
+                        "type": "string"
+                      },
+                      "selector": {
+                        "type": "string"
+                      },
+                      "attr": {
+                        "type": "string"
+                      }
+                    },
+                    "required": ["key"],
+                    "additionalProperties": false
+                  }
+                },
+                "waitFor": {
+                  "type": "string",
+                  "description": "Selector to wait for before extracting (for lazily rendered pages)."
+                },
+                "count": {
+                  "type": "number",
+                  "description": "How many of the first rows to open (1–5, default 3)."
+                }
+              },
+              "required": ["urlField", "fields"],
+              "additionalProperties": false
+            }
+          },
           "additionalProperties": false
         }
       },
