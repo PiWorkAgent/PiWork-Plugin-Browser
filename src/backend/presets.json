@@ -1,0 +1,82 @@
+[
+  {
+    "id": "preset:github-trending",
+    "name": "GitHub 今日趋势",
+    "url": "https://github.com/trending?since=daily",
+    "list": {
+      "scope": "article.Box-row",
+      "fields": [
+        { "key": "name", "selector": "h2 a" },
+        { "key": "link", "selector": "h2 a", "attr": "href" },
+        { "key": "desc", "selector": "p" },
+        { "key": "stars", "selector": "a[href$='/stargazers']" }
+      ],
+      "limit": 10
+    }
+  },
+  {
+    "id": "preset:producthunt-search",
+    "name": "Product Hunt 搜索",
+    "url": "https://www.producthunt.com/search/launches?q={{关键词}}",
+    "list": {
+      "scope": "button[data-test^=\"spotlight-result-product-\"]",
+      "fields": [
+        { "key": "name", "selector": "a[href^=\"/products/\"]:not([href$=\"/launches\"])" },
+        { "key": "link", "selector": "a[href^=\"/products/\"]:not([href$=\"/launches\"])", "attr": "href" }
+      ],
+      "limit": 5
+    }
+  },
+  {
+    "id": "preset:hackernews-front",
+    "name": "Hacker News 首页",
+    "url": "https://news.ycombinator.com/",
+    "list": {
+      "scope": "tr.athing",
+      "fields": [
+        { "key": "name", "selector": "span.titleline > a" },
+        { "key": "link", "selector": "span.titleline > a", "attr": "href" }
+      ],
+      "limit": 10
+    }
+  },
+  {
+    "id": "preset:wikipedia-search",
+    "name": "Wikipedia 搜索",
+    "url": "https://en.wikipedia.org/w/index.php?search={{关键词}}&title=Special:Search&fulltext=1",
+    "list": {
+      "scope": "ul.mw-search-results > li",
+      "fields": [
+        { "key": "name", "selector": ".mw-search-result-heading a" },
+        { "key": "link", "selector": ".mw-search-result-heading a", "attr": "href" },
+        { "key": "snippet", "selector": ".searchresult" }
+      ],
+      "limit": 5
+    }
+  },
+  {
+    "id": "preset:bilibili-search",
+    "name": "哔哩哔哩搜索",
+    "url": "https://search.bilibili.com/all?keyword={{关键词}}",
+    "list": {
+      "scope": ".bili-video-card:has(a[href*=\"/video/BV\"])",
+      "fields": [
+        { "key": "name", "selector": "h3.bili-video-card__info--tit" },
+        { "key": "link", "selector": "a[href*=\"/video/BV\"]", "attr": "href" }
+      ],
+      "limit": 5
+    }  },
+  {
+    "id": "preset:baidu-search",
+    "name": "百度搜索",
+    "url": "https://www.baidu.com/s?wd={{关键词}}",
+    "list": {
+      "scope": "#content_left .c-container:has(h3 a)",
+      "fields": [
+        { "key": "name", "selector": "h3" },
+        { "key": "link", "selector": "h3 a", "attr": "href" }
+      ],
+      "limit": 5
+    }
+  }
+]

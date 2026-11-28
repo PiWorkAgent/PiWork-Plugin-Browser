@@ -640,6 +640,7 @@ check(
 
 // ── site memory: favorites are the consent boundary ──
 const SHOP = 'https://shop.example.com/orders';
+const SUB = 'https://search.shop.example.com/x';
 
 const noMem = await callTool('browser_site_memory', { url: SHOP, action: 'list' });
 check(
@@ -671,6 +672,31 @@ check(
     /以页面为准/.test(memNav.content?.[0]?.text ?? ''),
   memNav.content?.[0]?.text,
 );
+
+check(
+  'navigating a favorited site also carries a compact element card with refs',
+  /【本页速查/.test(memNav.content?.[0]?.text ?? '') &&
+    /ref=\[1\]/.test(memNav.content?.[0]?.text ?? '') &&
+    !/可交互元素\(引用 ref/.test(memNav.content?.[0]?.text ?? ''),
+  memNav.content?.[0]?.text,
+);
+
+// A nav-heavy page must not fill the card with chrome and hide the content.
+const defaultSnapshot = snapshotText;
+snapshotText = [
+  ...Array.from({ length: 20 }, (_, i) => `[${i + 1}] link "导航${i + 1}" [href=/n${i + 1}]`),
+  '[21] link "一个很长的人工智能搜索结果标题用来测试排序" [href=/result]',
+  '[22] textbox "在这里输入" [#q]',
+].join('\n');
+const rankedNav = await callTool('browser_navigate', { url: SHOP });
+check(
+  'the card prefers content and controls over a wall of short nav links',
+  /人工智能搜索结果标题/.test(rankedNav.content?.[0]?.text ?? '') &&
+    /在这里输入/.test(rankedNav.content?.[0]?.text ?? '') &&
+    !/导航6/.test(rankedNav.content?.[0]?.text ?? ''),
+  rankedNav.content?.[0]?.text,
+);
+snapshotText = defaultSnapshot;
 
 const noteId = store[SITE_NOTES_KEY][0].id;
 check(
@@ -736,12 +762,27 @@ await panelRequest('m4', 'favorites.toggle', { url: SHOP });
 const unfavNav = await callTool('browser_navigate', { url: SHOP });
 const unfavList = await callTool('browser_site_memory', { url: SHOP, action: 'list' });
 check(
-  'unfavoriting stops injection but keeps the notes',
+  'unfavoriting stops injection (notes, card and recipes) but keeps the notes',
   !/【本站记忆/.test(unfavNav.content?.[0]?.text ?? '') &&
+    !/【本页速查/.test(unfavNav.content?.[0]?.text ?? '') &&
+    !/已记录的快捷操作/.test(unfavNav.content?.[0]?.text ?? '') &&
     store[SITE_NOTES_KEY].length === 1 &&
     /未收藏/.test(unfavList.content?.[0]?.text ?? ''),
   unfavList.content?.[0]?.text,
 );
+
+const unfavSub = await callTool('browser_navigate', { url: SUB });
+const unfavState = await panelRequest('st3', 'state.get');
+check(
+  'removing the last bookmark withdraws the whole site, including subdomains',
+  !/【本站记忆/.test(unfavSub.content?.[0]?.text ?? '') &&
+    !/已记录的快捷操作/.test(unfavSub.content?.[0]?.text ?? '') &&
+    unfavState?.result?.siteTrusted === false,
+  JSON.stringify({ nav: unfavSub.content?.[0]?.text, state: unfavState?.result }),
+);
+
+// Put the tab back on the recorded origin so the next act records there.
+await callTool('browser_navigate', { url: SHOP });
 
 // The panel writes as the user; re-enabling + re-favoriting restores injection.
 await panelRequest('m5', 'siteMemory.update', { id: noteId, enabled: true });
@@ -761,42 +802,150 @@ check(
 const act1 = await callTool('browser_act', { steps: [{ click: '[1]' }, { click: '[1]' }] });
 check(
   'a successful multi-step run on a favorited site offers ONE fact to remember',
-  /本站已收藏：如果这次操作里有一条/.test(act1.content?.[0]?.text ?? ''),
+  /本站已授权：如果这次操作里有一条/.test(act1.content?.[0]?.text ?? ''),
   act1.content?.[0]?.text,
 );
+check(
+  'the first successful run records a DRAFT, not a live recipe',
+  (store[RECIPES_KEY] ?? []).length === 1 &&
+    store[RECIPES_KEY][0].status === 'draft' &&
+    store[RECIPES_KEY][0].uses === 1,
+  JSON.stringify(store[RECIPES_KEY]),
+);
+const draftNav = await callTool('browser_navigate', { url: SHOP });
+check(
+  'a draft is never offered to the agent on navigation',
+  !/已记录的快捷操作/.test(draftNav.content?.[0]?.text ?? ''),
+  draftNav.content?.[0]?.text,
+);
+const draftList = await callTool('browser_recipes', { origin: SHOP });
+check(
+  'the agent can see a draft but is told not to run it',
+  /\[草稿/.test(draftList.content?.[0]?.text ?? '') &&
+    /标了「草稿」的不要自动执行/.test(draftList.content?.[0]?.text ?? ''),
+  draftList.content?.[0]?.text,
+);
+
 const act2 = await callTool('browser_act', { steps: [{ click: '[1]' }, { click: '[1]' }] });
 check(
   'the offer does not repeat for the same conversation and site',
-  !/本站已收藏：如果这次操作里有一条/.test(act2.content?.[0]?.text ?? ''),
+  !/本站已授权：如果这次操作里有一条/.test(act2.content?.[0]?.text ?? ''),
   act2.content?.[0]?.text,
+);
+check(
+  'a second identical success promotes the draft to active',
+  store[RECIPES_KEY][0].status === 'active' &&
+    store[RECIPES_KEY][0].confirmedBy === 'repeat' &&
+    store[RECIPES_KEY][0].uses === 2,
+  JSON.stringify(store[RECIPES_KEY][0]),
+);
+const liveNav = await callTool('browser_navigate', { url: SHOP });
+check(
+  'the promoted recipe is offered on navigation',
+  /已记录的快捷操作/.test(liveNav.content?.[0]?.text ?? ''),
+  liveNav.content?.[0]?.text,
+);
+
+// ── site-level consent: one bookmark covers sibling subdomains ──
+const subNav = await callTool('browser_navigate', { url: SUB });
+check(
+  'a sibling subdomain still gets the site memory and the recipe hint',
+  /【本站记忆/.test(subNav.content?.[0]?.text ?? '') &&
+    /来自 shop\.example\.com/.test(subNav.content?.[0]?.text ?? '') &&
+    /已记录的快捷操作/.test(subNav.content?.[0]?.text ?? '') &&
+    /录制于 shop\.example\.com/.test(subNav.content?.[0]?.text ?? ''),
+  subNav.content?.[0]?.text,
+);
+const subState = await panelRequest('st1', 'state.get');
+check(
+  'the page is not bookmarked, but its site is authorized',
+  subState?.result?.favorited === false &&
+    subState?.result?.siteTrusted === true &&
+    subState?.result?.site === 'example.com',
+  JSON.stringify(subState?.result),
+);
+const subRunCalls = calls.length;
+const activeRecipe = store[RECIPES_KEY][0];
+const recordedStart = `${activeRecipe.origin}${activeRecipe.paths[0] || '/'}`;
+const subRun = await panelRequest('st2', 'recipes.run', { id: activeRecipe.id });
+check(
+  'running a sibling-subdomain recipe first opens where it was recorded',
+  subRun?.result?.ok === true &&
+    calls
+      .slice(subRunCalls)
+      .some((c) => c.method === 'browser.navigate' && c.params.url === recordedStart),
+  JSON.stringify({ result: subRun?.result, recordedStart }),
 );
 
 // No offer while an unconfirmed note is already waiting for the user.
-const SHOP2 = 'https://shop2.example.com/x';
+const SHOP2 = 'https://shop2.example.org/x';
 await panelRequest('m8', 'favorites.toggle', { url: SHOP2, title: '第二个站' });
 const pending2 = await callTool('browser_site_memory', {
   url: SHOP2,
   action: 'add',
   text: '列表每页 20 条',
 });
-const pending2Id = store[SITE_NOTES_KEY].find((n) => n.origin === 'https://shop2.example.com').id;
+const pending2Id = store[SITE_NOTES_KEY].find((n) => n.origin === 'https://shop2.example.org').id;
 await callTool('browser_navigate', { url: SHOP2 });
 const act3 = await callTool('browser_act', { steps: [{ click: '[1]' }, { click: '[1]' }] });
 check(
   'no offer while an unconfirmed note is already pending',
   /已记为待确认/.test(pending2.content?.[0]?.text ?? '') &&
-    !/本站已收藏：如果这次操作里有一条/.test(act3.content?.[0]?.text ?? ''),
+    !/本站已授权：如果这次操作里有一条/.test(act3.content?.[0]?.text ?? ''),
   act3.content?.[0]?.text,
 );
 
 // And none on a site the user did not favorite.
-const SHOP3 = 'https://unstarred.example.com/y';
+const SHOP3 = 'https://unstarred.example.net/y';
 await callTool('browser_navigate', { url: SHOP3 });
 const act4 = await callTool('browser_act', { steps: [{ click: '[1]' }, { click: '[1]' }] });
 check(
   'no offer on an unfavorited site',
-  !/本站已收藏：如果这次操作里有一条/.test(act4.content?.[0]?.text ?? ''),
+  !/本站已授权：如果这次操作里有一条/.test(act4.content?.[0]?.text ?? ''),
   act4.content?.[0]?.text,
+);
+
+// The user is the other way a draft becomes live.
+const SHOP4 = 'https://shop4.example.info/z';
+await panelRequest('m10', 'favorites.toggle', { url: SHOP4, title: '第四个站' });
+await callTool('browser_navigate', { url: SHOP4 });
+const beforeCount = (store[RECIPES_KEY] ?? []).length;
+await callTool('browser_act', { steps: [{ click: '[1]' }] });
+check(
+  'a single click is not recorded as a recipe',
+  (store[RECIPES_KEY] ?? []).length === beforeCount,
+  JSON.stringify(store[RECIPES_KEY]),
+);
+await callTool('browser_act', { steps: [{ click: '[1]' }, { click: '[1]' }] });
+const shop4Rec = store[RECIPES_KEY].find((r) => r.origin === 'https://shop4.example.info');
+check(
+  'a one-run draft stays a draft',
+  shop4Rec?.status === 'draft',
+  JSON.stringify(shop4Rec),
+);
+const promoted = await panelRequest('m11', 'recipes.promote', { id: shop4Rec.id });
+const shop4Nav = await callTool('browser_navigate', { url: SHOP4 });
+check(
+  'confirming a draft in the panel makes it live and injected',
+  promoted?.result?.ok === true &&
+    store[RECIPES_KEY].find((r) => r.id === shop4Rec.id).confirmedBy === 'user' &&
+    /已记录的快捷操作/.test(shop4Nav.content?.[0]?.text ?? ''),
+  shop4Nav.content?.[0]?.text,
+);
+
+// Explicit withdrawal removes every bookmark under one site, and only that site.
+const MULTI1 = 'https://multi.example.co/x';
+const MULTI2 = 'https://other.multi.example.co/y';
+await panelRequest('u1', 'favorites.toggle', { url: MULTI1, title: '多页一' });
+await panelRequest('u2', 'favorites.toggle', { url: MULTI2, title: '多页二' });
+const multiBefore = store[FAVORITES_KEY].filter((f) => f.url.includes('multi.example.co')).length;
+const untrust = await panelRequest('u3', 'favorites.untrustSite', { site: 'example.co' });
+const multiAfter = store[FAVORITES_KEY].filter((f) => f.url.includes('multi.example.co')).length;
+check(
+  'explicit site revocation removes every bookmark under that site',
+  multiBefore === 2 && multiAfter === 0 && untrust?.result?.removed === 2 &&
+    store[FAVORITES_KEY].length > 0,
+  JSON.stringify({ multiBefore, multiAfter, result: untrust?.result }),
 );
 
 // A disputed pending note is paused, and the agent may not keep editing it.
@@ -1021,15 +1170,25 @@ const colAdd = await callTool('browser_collect', {
     count: 2,
   },
 });
+const addedCol = store[COLLECTIONS_KEY].find((c) => c.name === '每日趋势');
 check(
   'a collection stores where to look, not what was there',
   /已保存采集配方/.test(colAdd.content?.[0]?.text ?? '') &&
-    store[COLLECTIONS_KEY]?.length === 1 &&
-    store[COLLECTIONS_KEY][0].list.fields.length === 3 &&
-    store[COLLECTIONS_KEY][0].detail.count === 2,
+    !!addedCol &&
+    addedCol.list.fields.length === 3 &&
+    addedCol.detail.count === 2,
   JSON.stringify(store[COLLECTIONS_KEY]),
 );
-const colId = store[COLLECTIONS_KEY][0].id;
+check(
+  'starter recipes arrive once, as ordinary preset collections',
+  store[COLLECTIONS_KEY].filter((c) => c.createdBy === 'preset').length === 6 &&
+    store[COLLECTIONS_KEY].some((c) => c.id === 'preset:github-trending') &&
+    store[COLLECTIONS_KEY].some(
+      (c) => c.id === 'preset:producthunt-search' && c.params.includes('关键词'),
+    ),
+  JSON.stringify(store[COLLECTIONS_KEY].map((c) => [c.id, c.createdBy])),
+);
+const colId = addedCol.id;
 const colRun = await callTool('browser_collect', { action: 'run', id: colId });
 check(
   'running a collection returns only the named fields, plus details',
@@ -1055,6 +1214,52 @@ check(
     /进前 2 条取 readme/.test(colList.content?.[0]?.text ?? ''),
   colList.content?.[0]?.text,
 );
+
+// A template URL turns one recipe into a keyword-agnostic tool.
+await callTool('browser_collect', {
+  action: 'add',
+  name: '关键词搜索',
+  url: 'https://shop.example.com/trending?q={{关键词}}',
+  list: { scope: '.row', fields: [{ key: 'name', selector: '.name' }], limit: 2 },
+});
+const paramCol = store[COLLECTIONS_KEY].find((c) => c.name === '关键词搜索');
+check(
+  'a templated URL records its parameters',
+  Array.isArray(paramCol?.params) && paramCol.params.length === 1 && paramCol.params[0] === '关键词',
+  JSON.stringify(paramCol),
+);
+const paramMissing = await callTool('browser_collect', { action: 'run', id: paramCol.id });
+check(
+  'running without values names the missing parameter and does not count as a failure',
+  /还需要参数：关键词/.test(paramMissing.content?.[0]?.text ?? '') &&
+    store[COLLECTIONS_KEY].find((c) => c.id === paramCol.id).failures === 0 &&
+    store[COLLECTIONS_KEY].find((c) => c.id === paramCol.id).uses === 0,
+  paramMissing.content?.[0]?.text,
+);
+const paramRun = await callTool('browser_collect', {
+  action: 'run',
+  id: paramCol.id,
+  values: { 关键词: 'AI' },
+});
+check(
+  'running with values fills the URL instead of rebuilding the recipe',
+  /采集「关键词搜索」：2 条/.test(paramRun.content?.[0]?.text ?? '') &&
+    calls.some((c) => c.method === 'browser.navigate' && c.params.url.includes('q=AI')),
+  paramRun.content?.[0]?.text,
+);
+const paramPanel = await panelRequest('colp', 'collections.run', {
+  id: paramCol.id,
+  values: { 关键词: 'CRM' },
+});
+check(
+  'the panel can run the same recipe with a different value',
+  paramPanel?.result?.ok === true &&
+    Array.isArray(paramPanel.result.list) &&
+    paramPanel.result.list.length > 0 &&
+    calls.some((c) => c.method === 'browser.navigate' && c.params.url.includes('q=CRM')),
+  JSON.stringify(paramPanel?.result),
+);
+await callTool('browser_collect', { action: 'remove', id: paramCol.id });
 
 const colOverview = await panelRequest('col1', 'memory.overview');
 check(
@@ -1087,8 +1292,9 @@ check(
 await callTool('browser_collect', { action: 'remove', id: badId });
 await panelRequest('col2', 'collections.remove', { id: colId });
 check(
-  'removing collections empties the store',
-  store[COLLECTIONS_KEY].length === 0,
+  'removing collections leaves only the starter presets',
+  !store[COLLECTIONS_KEY].some((c) => c.id === colId || c.id === badId) &&
+    store[COLLECTIONS_KEY].every((c) => c.createdBy === 'preset'),
   JSON.stringify(store[COLLECTIONS_KEY]),
 );
 

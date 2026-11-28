@@ -1237,6 +1237,91 @@ __name(plugin, "plugin");
 // src/backend/index.ts
 var import_tldts = __toESM(require_cjs(), 1);
 
+// src/backend/presets.json
+var presets_default = [
+  {
+    id: "preset:github-trending",
+    name: "GitHub \u4ECA\u65E5\u8D8B\u52BF",
+    url: "https://github.com/trending?since=daily",
+    list: {
+      scope: "article.Box-row",
+      fields: [
+        { key: "name", selector: "h2 a" },
+        { key: "link", selector: "h2 a", attr: "href" },
+        { key: "desc", selector: "p" },
+        { key: "stars", selector: "a[href$='/stargazers']" }
+      ],
+      limit: 10
+    }
+  },
+  {
+    id: "preset:producthunt-search",
+    name: "Product Hunt \u641C\u7D22",
+    url: "https://www.producthunt.com/search/launches?q={{\u5173\u952E\u8BCD}}",
+    list: {
+      scope: 'button[data-test^="spotlight-result-product-"]',
+      fields: [
+        { key: "name", selector: 'a[href^="/products/"]:not([href$="/launches"])' },
+        { key: "link", selector: 'a[href^="/products/"]:not([href$="/launches"])', attr: "href" }
+      ],
+      limit: 5
+    }
+  },
+  {
+    id: "preset:hackernews-front",
+    name: "Hacker News \u9996\u9875",
+    url: "https://news.ycombinator.com/",
+    list: {
+      scope: "tr.athing",
+      fields: [
+        { key: "name", selector: "span.titleline > a" },
+        { key: "link", selector: "span.titleline > a", attr: "href" }
+      ],
+      limit: 10
+    }
+  },
+  {
+    id: "preset:wikipedia-search",
+    name: "Wikipedia \u641C\u7D22",
+    url: "https://en.wikipedia.org/w/index.php?search={{\u5173\u952E\u8BCD}}&title=Special:Search&fulltext=1",
+    list: {
+      scope: "ul.mw-search-results > li",
+      fields: [
+        { key: "name", selector: ".mw-search-result-heading a" },
+        { key: "link", selector: ".mw-search-result-heading a", attr: "href" },
+        { key: "snippet", selector: ".searchresult" }
+      ],
+      limit: 5
+    }
+  },
+  {
+    id: "preset:bilibili-search",
+    name: "\u54D4\u54E9\u54D4\u54E9\u641C\u7D22",
+    url: "https://search.bilibili.com/all?keyword={{\u5173\u952E\u8BCD}}",
+    list: {
+      scope: '.bili-video-card:has(a[href*="/video/BV"])',
+      fields: [
+        { key: "name", selector: "h3.bili-video-card__info--tit" },
+        { key: "link", selector: 'a[href*="/video/BV"]', attr: "href" }
+      ],
+      limit: 5
+    }
+  },
+  {
+    id: "preset:baidu-search",
+    name: "\u767E\u5EA6\u641C\u7D22",
+    url: "https://www.baidu.com/s?wd={{\u5173\u952E\u8BCD}}",
+    list: {
+      scope: "#content_left .c-container:has(h3 a)",
+      fields: [
+        { key: "name", selector: "h3" },
+        { key: "link", selector: "h3 a", attr: "href" }
+      ],
+      limit: 5
+    }
+  }
+];
+
 // src/backend/imt.ts
 import { createHash } from "node:crypto";
 
@@ -3036,6 +3121,8 @@ __name(selSource, "selSource");
 // src/backend/index.ts
 var NAVIGATE_TIMEOUT_MS = 6e4;
 var SNAPSHOT_MAX_CHARS = 8e3;
+var PAGE_CARD_MAX_LINES = 12;
+var PAGE_CARD_MAX_CHARS = 900;
 var HISTORY_KEY = "history.entries";
 var FAVORITES_KEY = "favorites.items";
 var SETTINGS_KEY = "settings";
@@ -3045,11 +3132,13 @@ var SITE_RUNS_KEY = "site.runs";
 var SITE_RUNS_MAX = 50;
 var INJECTION_TTL_MS = 30 * 6e4;
 var NOTE_REVISIONS_MAX = 10;
+var RECIPES_MAX = 60;
 var WORKFLOWS_KEY = "workflows.items";
 var WORKFLOWS_MAX = 100;
 var WORKFLOW_STEPS_MAX = 20;
 var WORKFLOW_REVISIONS_MAX = 10;
 var COLLECTIONS_KEY = "collections.items";
+var PRESETS_APPLIED_KEY = "presets.applied";
 var COLLECTIONS_MAX = 50;
 var COLLECT_FIELDS_MAX = 12;
 var COLLECT_ROWS_MAX = 50;
@@ -3473,7 +3562,15 @@ function pushHostState(ctx, hostTabId) {
   ctx.send(
     "browser",
     "ui.urlChanged",
-    { url, title, favorited: isFavorite(url), private: privateMode },
+    {
+      url,
+      title,
+      favorited: isFavorite(url),
+      site: siteOf(url),
+      siteTrusted: trustedSite(siteOf(url)),
+      siteFavoriteCount: favorites.filter((f) => siteOf(f.url) === siteOf(url)).length,
+      private: privateMode
+    },
     hostTabId
   );
 }
@@ -3532,7 +3629,15 @@ async function syncBucket(ctx) {
   } else if (b.tabs.length === 0) {
     lastUrl = "";
     for (const panelId of panelTargets()) {
-      ctx.send(panelId, "ui.urlChanged", { url: "", title: "", favorited: false, private: privateMode });
+      ctx.send(panelId, "ui.urlChanged", {
+        url: "",
+        title: "",
+        favorited: false,
+        site: "",
+        siteTrusted: false,
+        siteFavoriteCount: 0,
+        private: privateMode
+      });
     }
   }
 }
@@ -3712,22 +3817,22 @@ function pathRank(recipe, currentPath) {
   return 2;
 }
 __name(pathRank, "pathRank");
-function isFavoriteOrigin(origin) {
-  return !!origin && favorites.some((f) => originOfUrl(f.url) === origin);
+function trustedSite(site) {
+  return !!site && favorites.some((f) => siteOf(f.url) === site);
 }
-__name(isFavoriteOrigin, "isFavoriteOrigin");
-function notesFor(origin) {
-  return origin ? siteNotes.filter((n) => n.origin === origin) : [];
+__name(trustedSite, "trustedSite");
+function notesForSite(site) {
+  return site ? siteNotes.filter((n) => (n.site || siteOf(n.origin)) === site) : [];
 }
-__name(notesFor, "notesFor");
-function liveNotes(origin) {
-  return notesFor(origin).filter((n) => n.enabled !== false && !n.suspect);
+__name(notesForSite, "notesForSite");
+function liveNotes(site) {
+  return notesForSite(site).filter((n) => n.enabled !== false && !n.suspect);
 }
 __name(liveNotes, "liveNotes");
-function siteMemoryDigest(origin) {
+function siteMemoryDigest(site, origin) {
   const empty = { text: "", ids: [] };
-  if (!isFavoriteOrigin(origin)) return empty;
-  const notes = liveNotes(origin);
+  if (!trustedSite(site)) return empty;
+  const notes = liveNotes(site);
   if (notes.length === 0) return empty;
   const shown = [];
   let used = 0;
@@ -3741,19 +3846,62 @@ function siteMemoryDigest(origin) {
   return {
     ids: shown.map((n) => n.id),
     text: `\u3010\u672C\u7AD9\u8BB0\u5FC6 \xB7 ${notes.length} \u6761${pending > 0 ? `\uFF0C\u5176\u4E2D ${pending} \u6761\u672A\u786E\u8BA4` : ""}\uFF0C\u7528\u6237\u6C89\u6DC0\u7684\u957F\u671F\u77E5\u8BC6\u3011
-` + shown.map((n) => `- ${n.text}${n.verified === false ? "\uFF08AI \u89C2\u5BDF\uFF0C\u672A\u786E\u8BA4\uFF09" : ""}`).join("\n") + (rest > 0 ? `
+` + shown.map((n) => {
+      const from = n.origin && n.origin !== origin ? `\uFF08\u6765\u81EA ${n.origin.replace(/^https?:\/\//, "")}\uFF09` : "";
+      return `- ${n.text}${from}${n.verified === false ? "\uFF08AI \u89C2\u5BDF\uFF0C\u672A\u786E\u8BA4\uFF09" : ""}`;
+    }).join("\n") + (rest > 0 ? `
 \uFF08\u53E6\u6709 ${rest} \u6761\uFF0C\u7528 browser_site_memory \u67E5\u770B\uFF09` : "") + "\n\u8FD9\u662F\u8BB0\u5FC6\uFF0C\u4E0D\u662F\u5F53\u524D\u9875\u9762\u7684\u5B9E\u65F6\u72B6\u6001\uFF1A\u4E0E\u9875\u9762\u4E0D\u7B26\u65F6\u4EE5\u9875\u9762\u4E3A\u51C6\uFF0C\u7528 browser_site_memory \u7684 dispute \u62A5\u544A\u54EA\u6761\u4E0D\u5BF9\uFF08\u5B83\u4F1A\u88AB\u6807\u4E3A\u53EF\u7591\u3001\u6682\u505C\u63D0\u4F9B\uFF09\u3002"
   };
 }
 __name(siteMemoryDigest, "siteMemoryDigest");
-function memoryLearningHint(sessionKey, origin, stepCount) {
-  if (stepCount < 2 || !origin || !isFavoriteOrigin(origin)) return "";
-  if (notesFor(origin).some((n) => n.verified === false)) return "";
-  const key = `${sessionKey ?? ""}|${origin}`;
+function pageCardDigest(snapshot) {
+  const lines = String(snapshot ?? "").replace(/\r/g, "").split("\n").map((line) => line.trim()).filter(Boolean);
+  if (lines.length === 0) return "";
+  const elements = lines.filter((line) => /ref=|^\[\d+\]/.test(line));
+  const pool = elements.length > 0 ? elements : lines;
+  const quoted = /* @__PURE__ */ __name((line) => (line.match(/["“]([^"”\n]{1,160})["”]/) ?? [])[1] ?? "", "quoted");
+  const isControl = /* @__PURE__ */ __name((line) => /(?:^|[^a-z])(button|textbox|combobox|checkbox|radio|switch|input)(?:[^a-z]|$)/i.test(line), "isControl");
+  const score = /* @__PURE__ */ __name((line) => {
+    const text = quoted(line);
+    let value = 0;
+    value += Math.min(text.length, 80) / 8;
+    if (isControl(line)) value += 8;
+    if (text) value += 1;
+    if (/below-fold/i.test(line)) value -= 1.5;
+    return value;
+  }, "score");
+  const rich = [];
+  const chrome = [];
+  pool.forEach((line, index) => {
+    const entry = { line, index, score: score(line) };
+    (isControl(line) || quoted(line).length >= 6 ? rich : chrome).push(entry);
+  });
+  rich.sort((a, b) => b.score - a.score || a.index - b.index);
+  chrome.sort((a, b) => b.score - a.score || a.index - b.index);
+  const selected = [
+    ...rich.slice(0, PAGE_CARD_MAX_LINES),
+    ...chrome.slice(0, Math.min(4, Math.max(0, PAGE_CARD_MAX_LINES - rich.length)))
+  ].sort((a, b) => a.index - b.index);
+  let body = "";
+  for (const { line } of selected) {
+    const clipped = line.length > 140 ? `${line.slice(0, 140)}\u2026` : line;
+    const next = body ? `${body}
+${clipped}` : clipped;
+    if (next.length > PAGE_CARD_MAX_CHARS) break;
+    body = next;
+  }
+  if (!body) return "";
+  return "\u3010\u672C\u9875\u901F\u67E5 \xB7 \u6309\u53EF\u64CD\u4F5C\u6027\u548C\u6B63\u6587\u5185\u5BB9\u6311\u9009\uFF0C\u4E0D\u662F\u6574\u9875\uFF1Bref \u53EF\u76F4\u63A5\u7528\u4E8E browser_click / browser_fill\uFF0C\u5B8C\u6574\u7ED3\u6784\u7528 browser_get_state\u3011\n" + body;
+}
+__name(pageCardDigest, "pageCardDigest");
+function memoryLearningHint(sessionKey, site, stepCount) {
+  if (stepCount < 2 || !site || !trustedSite(site)) return "";
+  if (notesForSite(site).some((n) => n.verified === false)) return "";
+  const key = `${sessionKey ?? ""}|${site}`;
   if (memoryNudged.has(key)) return "";
   if (memoryNudged.size > 1e3) memoryNudged.clear();
   memoryNudged.add(key);
-  return "\n\n\uFF08\u672C\u7AD9\u5DF2\u6536\u85CF\uFF1A\u5982\u679C\u8FD9\u6B21\u64CD\u4F5C\u91CC\u6709\u4E00\u6761\u4E0B\u6B21\u80FD\u7701\u4E8B\u7684\u3001\u53EF\u9A8C\u8BC1\u7684\u4E8B\u5B9E\u2014\u2014\u5165\u53E3\u5728\u54EA\u3001\u5B57\u6BB5\u53EB\u4EC0\u4E48\u3001\u64CD\u4F5C\u540E\u9875\u9762\u600E\u4E48\u53D8\u2014\u2014\u53EF\u4EE5\u7528 browser_site_memory \u8BB0\u4E00\u6761\uFF0C\u7528\u6237\u5728\u9762\u677F\u91CC\u786E\u8BA4\u540E\u8F6C\u6B63\uFF1B\u5224\u65AD\u6027\u7684\u89C4\u77E9\u4E0D\u8981\u81EA\u5DF1\u5199\u3002\uFF09";
+  return "\n\n\uFF08\u672C\u7AD9\u5DF2\u6388\u6743\uFF1A\u5982\u679C\u8FD9\u6B21\u64CD\u4F5C\u91CC\u6709\u4E00\u6761\u4E0B\u6B21\u80FD\u7701\u4E8B\u7684\u3001\u53EF\u9A8C\u8BC1\u7684\u4E8B\u5B9E\u2014\u2014\u5165\u53E3\u5728\u54EA\u3001\u5B57\u6BB5\u53EB\u4EC0\u4E48\u3001\u64CD\u4F5C\u540E\u9875\u9762\u600E\u4E48\u53D8\u2014\u2014\u53EF\u4EE5\u7528 browser_site_memory \u8BB0\u4E00\u6761\uFF0C\u7528\u6237\u5728\u9762\u677F\u91CC\u786E\u8BA4\u540E\u8F6C\u6B63\uFF1B\u5224\u65AD\u6027\u7684\u89C4\u77E9\u4E0D\u8981\u81EA\u5DF1\u5199\u3002\uFF09";
 }
 __name(memoryLearningHint, "memoryLearningHint");
 function normalizeNoteText(input) {
@@ -3767,9 +3915,10 @@ __name(newNoteId, "newNoteId");
 async function addSiteNote(ctx, url, text, by) {
   const origin = originOfUrl(url);
   if (!origin) throw new Error("\u8FD9\u4E2A\u9875\u9762\u8FD8\u6CA1\u6709\u7F51\u5740\uFF0C\u5148\u6253\u5F00\u4E00\u4E2A\u7F51\u9875");
+  const site = siteOf(url);
   const clean = normalizeNoteText(text);
   if (!clean) throw new Error("\u5199\u4E00\u53E5\u8FD9\u4E2A\u7F51\u7AD9\u7684\u7528\u9014\u6216\u6CE8\u610F\u4E8B\u9879");
-  const mine = notesFor(origin);
+  const mine = notesForSite(site);
   if (mine.length >= SITE_NOTES_MAX) {
     throw new Error(`\u672C\u7AD9\u8BB0\u5FC6\u5DF2\u7ECF\u6709 ${SITE_NOTES_MAX} \u6761\uFF0C\u5148\u5220\u6389\u4E00\u4E9B\u518D\u8BB0`);
   }
@@ -3777,7 +3926,7 @@ async function addSiteNote(ctx, url, text, by) {
   const note = {
     id: newNoteId(),
     origin,
-    site: siteOf(url),
+    site,
     text: clean,
     by,
     // A person's own sentence is confirmed by definition; the agent's is a
@@ -3872,7 +4021,7 @@ async function restoreSiteNote(ctx, id, at) {
 }
 __name(restoreSiteNote, "restoreSiteNote");
 async function recordRun(ctx, run) {
-  if (!isFavoriteOrigin(run.origin)) return;
+  if (!trustedSite(siteOf(run.origin))) return;
   const record = {
     id: `x${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`,
     ...run
@@ -4017,6 +4166,15 @@ function normalizeCollectFields(input) {
   return out;
 }
 __name(normalizeCollectFields, "normalizeCollectFields");
+function collectionUrlParams(url) {
+  const out = [];
+  for (const match of String(url).matchAll(/\{\{([^{}]+)\}\}/g)) {
+    const name = match[1].trim();
+    if (name && !out.includes(name)) out.push(name);
+  }
+  return out;
+}
+__name(collectionUrlParams, "collectionUrlParams");
 function collectionSpecFrom(input) {
   const url = normalizeUrl(String(input.url ?? "").trim());
   const name = normalizeNoteText(input.name).slice(0, 80);
@@ -4042,7 +4200,13 @@ function collectionSpecFrom(input) {
       };
     }
   }
-  return { name, url, list: { scope, fields, limit }, ...detail ? { detail } : {} };
+  return {
+    name,
+    url,
+    params: collectionUrlParams(url),
+    list: { scope, fields, limit },
+    ...detail ? { detail } : {}
+  };
 }
 __name(collectionSpecFrom, "collectionSpecFrom");
 function collectExpression(scope, fields, limit) {
@@ -4095,6 +4259,11 @@ function collectionById(id) {
 __name(collectionById, "collectionById");
 async function addCollection(ctx, input, by) {
   const spec = collectionSpecFrom(input);
+  if (!trustedSite(siteOf(spec.url))) {
+    throw new Error(
+      `\u672C\u7AD9\u8FD8\u6CA1\u6536\u85CF\uFF1A\u5148\u5728\u6D4F\u89C8\u5668\u91CC\u6536\u85CF ${siteOf(spec.url) || "\u8FD9\u4E2A\u7AD9"}\uFF0C\u624D\u80FD\u5EFA\u91C7\u96C6\u914D\u65B9`
+    );
+  }
   if (collections.length >= COLLECTIONS_MAX) {
     throw new Error(`\u91C7\u96C6\u914D\u65B9\u5DF2\u7ECF\u6709 ${COLLECTIONS_MAX} \u4E2A\uFF0C\u5148\u5220\u6389\u4E00\u4E9B`);
   }
@@ -4105,6 +4274,7 @@ async function addCollection(ctx, input, by) {
     site: siteOf(spec.url),
     name: spec.name,
     url: spec.url,
+    params: spec.params,
     list: spec.list,
     ...spec.detail ? { detail: spec.detail } : {},
     createdBy: by,
@@ -4119,6 +4289,49 @@ async function addCollection(ctx, input, by) {
   return collection;
 }
 __name(addCollection, "addCollection");
+async function seedPresets(ctx) {
+  const appliedRaw = await readKey(ctx, PRESETS_APPLIED_KEY);
+  const applied = new Set(Array.isArray(appliedRaw) ? appliedRaw.map((x) => String(x)) : []);
+  let changed = false;
+  for (const raw of presets_default) {
+    const id = String(raw.id ?? "");
+    if (!id || applied.has(id)) continue;
+    if (collections.some((c) => c.id === id)) {
+      applied.add(id);
+      changed = true;
+      continue;
+    }
+    if (collections.length >= COLLECTIONS_MAX) break;
+    try {
+      const spec = collectionSpecFrom(raw);
+      const now = Date.now();
+      collections.push({
+        id,
+        origin: originOfUrl(spec.url),
+        site: siteOf(spec.url),
+        name: spec.name,
+        url: spec.url,
+        params: spec.params,
+        list: spec.list,
+        ...spec.detail ? { detail: spec.detail } : {},
+        createdBy: "preset",
+        createdAt: now,
+        updatedAt: now,
+        uses: 0,
+        failures: 0
+      });
+    } catch (err) {
+      ctx.log.warn(`preset ${id} skipped: ${describe3(err)}`);
+    }
+    applied.add(id);
+    changed = true;
+  }
+  if (changed) {
+    await save(ctx, COLLECTIONS_KEY, collections, "collections");
+    await save(ctx, PRESETS_APPLIED_KEY, [...applied], "presets");
+  }
+}
+__name(seedPresets, "seedPresets");
 async function updateCollection(ctx, id, input) {
   const collection = collectionById(id);
   if (!collection) throw new Error("\u6CA1\u6709\u627E\u5230\u8FD9\u4E2A\u91C7\u96C6\u914D\u65B9");
@@ -4130,6 +4343,7 @@ async function updateCollection(ctx, id, input) {
   });
   collection.name = spec.name;
   collection.url = spec.url;
+  collection.params = spec.params;
   collection.origin = originOfUrl(spec.url);
   collection.site = siteOf(spec.url);
   collection.list = spec.list;
@@ -4170,7 +4384,7 @@ async function recordCollectionRun(ctx, collection, ok, error) {
   broadcast(ctx, "ui.collectionsChanged", { id: collection.id });
 }
 __name(recordCollectionRun, "recordCollectionRun");
-async function runCollection(ctx, collection, tid) {
+async function runCollection(ctx, collection, tid, values = {}) {
   const started = Date.now();
   const tabArg = tid ? { tabId: tid } : {};
   const go = /* @__PURE__ */ __name(async (url) => {
@@ -4183,8 +4397,20 @@ async function runCollection(ctx, collection, tid) {
     error: message,
     ms: Date.now() - started
   }), "fail");
+  const wanted = collection.params ?? collectionUrlParams(collection.url);
+  const missing = wanted.filter((name) => !String(values[name] ?? "").trim());
+  if (missing.length > 0) {
+    return {
+      ...fail(`\u7F3A\u5C11\u53C2\u6570\uFF1A${missing.join("\u3001")}`),
+      missing
+    };
+  }
+  const targetUrl = collection.url.replace(/\{\{([^{}]+)\}\}/g, (match, rawName) => {
+    const name = String(rawName).trim();
+    return String(values[name] ?? "").trim() || match;
+  });
   try {
-    await go(collection.url);
+    await go(targetUrl);
   } catch (err) {
     return fail(zhError(err instanceof Error ? err.message : String(err)));
   }
@@ -4263,10 +4489,17 @@ function recipeStepsKey(steps) {
   return JSON.stringify(steps.map((s) => [s.kind, s.target, s.value ?? "", s.expect ?? ""]));
 }
 __name(recipeStepsKey, "recipeStepsKey");
-function liveRecipes(origin) {
-  return recipes.filter((r) => r.origin === origin && r.failures < 2);
+function liveRecipes(site) {
+  return recipes.filter((r) => r.site === site && r.status !== "draft" && r.failures < 2);
 }
 __name(liveRecipes, "liveRecipes");
+function promoteIfEarned(recipe) {
+  if (recipe.status !== "draft" || recipe.uses < 2) return;
+  recipe.status = "active";
+  recipe.confirmedAt = Date.now();
+  recipe.confirmedBy = "repeat";
+}
+__name(promoteIfEarned, "promoteIfEarned");
 function expectationGap(expect, actual, page) {
   if (!expect) return null;
   const wantUrl = /页面跳转到\s*(\S+)/.exec(expect);
@@ -4302,7 +4535,7 @@ async function stabilizeTarget(ctx, tid, selector) {
 __name(stabilizeTarget, "stabilizeTarget");
 async function recordRecipe(ctx, rawSteps, effects, url, name, title, tid, creditedId) {
   const origin = originOfUrl(url ?? "");
-  if (!origin || !isFavoriteOrigin(origin)) return null;
+  if (!origin || !trustedSite(siteOf(url ?? ""))) return null;
   const steps = [];
   const valueMap = [];
   let params = 0;
@@ -4343,7 +4576,7 @@ async function recordRecipe(ctx, rawSteps, effects, url, name, title, tid, credi
       steps.push({ kind: "wait", target: String(step.wait), expect });
     }
   }
-  if (steps.length === 0) return null;
+  if (steps.length < 2) return null;
   for (const st of steps) {
     if (st.kind === "fill" && st.value) {
       st.expect = `\u5DF2\u5199\u5165\uFF0C\u5F53\u524D\u503C\u300C${st.value}\u300D`;
@@ -4359,6 +4592,17 @@ async function recordRecipe(ctx, rawSteps, effects, url, name, title, tid, credi
   const existing = recipes.find((r) => r.origin === origin && recipeSignature(r.steps) === signature);
   const path = pathOf(url ?? "");
   if (existing) {
+    if (recipeStepsKey(existing.steps) !== recipeStepsKey(steps)) {
+      existing.revisions = [
+        ...existing.revisions ?? [],
+        {
+          at: Date.now(),
+          by: "agent",
+          name: existing.name,
+          steps: existing.steps.map((s) => ({ ...s }))
+        }
+      ].slice(-NOTE_REVISIONS_MAX);
+    }
     existing.steps = steps;
     if (existing.id !== creditedId) existing.uses += 1;
     existing.lastOk = Date.now();
@@ -4366,6 +4610,7 @@ async function recordRecipe(ctx, rawSteps, effects, url, name, title, tid, credi
     delete existing.lastError;
     existing.paths = [path, ...existing.paths.filter((p) => p !== path)].slice(0, 3);
     if (name) existing.name = name;
+    promoteIfEarned(existing);
     await save(ctx, RECIPES_KEY, recipes, "recipes");
     return existing;
   }
@@ -4377,11 +4622,16 @@ async function recordRecipe(ctx, rawSteps, effects, url, name, title, tid, credi
     name: (name ?? "").trim() || (title ?? "\u6B64\u7AD9\u64CD\u4F5C").slice(0, 24),
     params,
     steps,
+    status: "draft",
     uses: 1,
     lastOk: Date.now(),
     failures: 0
   };
-  recipes = [recipe, ...recipes].slice(0, 60);
+  recipes = [recipe, ...recipes];
+  if (recipes.length > RECIPES_MAX) {
+    const draftIndex = recipes.findLastIndex((r) => r.status === "draft");
+    recipes.splice(draftIndex >= 0 ? draftIndex : recipes.length - 1, 1);
+  }
   await save(ctx, RECIPES_KEY, recipes, "recipes");
   return recipe;
 }
@@ -4531,6 +4781,13 @@ async function loadState(ctx) {
         paths: Array.isArray(x.paths) ? x.paths : [],
         uses: x.uses ?? 0,
         failures: x.failures ?? 0,
+        // Trust is earned, not inherited: a recipe is live only if it was
+        // confirmed (by the user or a second success) or hand-edited. Older
+        // auto-recorded recipes — including ones a previous build stamped
+        // "active" without asking — wait as drafts for review.
+        status: x.status === "draft" ? "draft" : Number(x.confirmedAt) > 0 || revisions.length > 0 ? "active" : "draft",
+        ...Number(x.confirmedAt) ? { confirmedAt: Number(x.confirmedAt) } : {},
+        ...x.confirmedBy === "repeat" || x.confirmedBy === "user" ? { confirmedBy: x.confirmedBy } : {},
         ...revisions.length ? { revisions } : {}
       };
     });
@@ -4606,6 +4863,7 @@ async function loadState(ctx) {
       site: String(x.site) || siteOf(String(x.url)),
       name: String(x.name).slice(0, 80),
       url: String(x.url),
+      params: Array.isArray(x.params) ? x.params.map((p) => String(p)).filter(Boolean) : collectionUrlParams(String(x.url)),
       list: {
         scope: String(x.list?.scope ?? ""),
         fields: normalizeCollectFields(x.list?.fields),
@@ -4619,7 +4877,7 @@ async function loadState(ctx) {
           count: Math.min(COLLECT_DETAIL_MAX, Math.max(1, Number(x.detail.count) || 3))
         }
       } : {},
-      createdBy: x.createdBy === "agent" ? "agent" : "user",
+      createdBy: x.createdBy === "agent" ? "agent" : x.createdBy === "preset" ? "preset" : "user",
       createdAt: Number(x.createdAt) || Date.now(),
       updatedAt: Number(x.updatedAt) || Date.now(),
       uses: Number(x.uses) || 0,
@@ -4633,6 +4891,7 @@ async function loadState(ctx) {
       } : {}
     })).filter((x) => x.list.fields.length > 0).slice(0, COLLECTIONS_MAX);
   }
+  await seedPresets(ctx);
   const settings = s;
   privateMode = Boolean(settings?.private);
   selPopup = settings?.selPopup !== false;
@@ -4666,10 +4925,15 @@ function recordVisit(url, title) {
 __name(recordVisit, "recordVisit");
 function pushUrl(ctx, url, title, hostTabId) {
   lastUrl = url;
+  const site = siteOf(url);
   const data = {
     url,
     title: title ?? history.find((e) => e.url === urlKey(url))?.title ?? "",
     favorited: isFavorite(url),
+    // Site-level consent: one bookmark covers the whole registrable domain.
+    site,
+    siteTrusted: trustedSite(site),
+    siteFavoriteCount: favorites.filter((f) => siteOf(f.url) === site).length,
     private: privateMode
   };
   const target = hostTabId ?? activeHostTab ?? void 0;
@@ -5352,10 +5616,14 @@ plugin({
         );
         if (state?.url) lastUrl = state.url;
         const b = bucketFor(key);
+        const stateSite = siteOf(state?.url ?? "");
         return {
           url: state?.url ?? "",
           title: state?.title ?? "",
           favorited: isFavorite(state?.url ?? ""),
+          site: stateSite,
+          siteTrusted: trustedSite(stateSite),
+          siteFavoriteCount: favorites.filter((f) => siteOf(f.url) === stateSite).length,
           private: privateMode,
           selPopup,
           clips: clips.length,
@@ -5412,6 +5680,21 @@ plugin({
         }
         target.failures = 0;
         delete target.lastError;
+        target.status = "active";
+        target.confirmedAt = Date.now();
+        target.confirmedBy = "user";
+        await save(ctx, RECIPES_KEY, recipes, "recipes");
+        broadcast(ctx, "ui.recipesChanged", { recipes });
+        return { ok: true };
+      }
+      case "recipes.promote": {
+        const target = recipes.find((r) => r.id === String(params.id ?? ""));
+        if (!target) return { ok: false, error: "recipe not found" };
+        target.status = "active";
+        target.confirmedAt = Date.now();
+        target.confirmedBy = "user";
+        target.failures = 0;
+        delete target.lastError;
         await save(ctx, RECIPES_KEY, recipes, "recipes");
         broadcast(ctx, "ui.recipesChanged", { recipes });
         return { ok: true };
@@ -5444,12 +5727,13 @@ plugin({
         const tabId = targetTabId(key);
         if (!tabId) return { ok: false, error: "\u8FD9\u4E2A\u4F1A\u8BDD\u8FD8\u6CA1\u6709\u6253\u5F00\u7F51\u9875" };
         const here = await ctx.call("browser.getUrl", { tabId });
-        const where = originOfUrl(here?.url ?? "");
-        if (where !== rec.origin) {
+        const whereUrl = here?.url ?? "";
+        const where = originOfUrl(whereUrl);
+        if (!where || siteOf(whereUrl) !== rec.site) {
           return {
             ok: false,
-            error: `\u8FD9\u6761\u914D\u65B9\u662F\u7ED9 ${rec.site} \u7528\u7684\uFF0C\u5F53\u524D\u9875\u9762\u4E0D\u5728\u90A3\u4E2A\u7F51\u7AD9\u4E0A`,
-            origin: rec.origin
+            error: `\u8FD9\u6761\u914D\u65B9\u662F\u7ED9 ${rec.site} \u7528\u7684\uFF0C\u5F53\u524D\u9875\u9762\u4E0D\u5728\u8FD9\u4E2A\u7AD9\u70B9`,
+            site: rec.site
           };
         }
         const raw = params.values && typeof params.values === "object" ? params.values : {};
@@ -5464,6 +5748,14 @@ plugin({
         const needFiles = rec.steps.map((st, i) => st.kind === "upload" && !values[`file:${i}`]?.trim() ? i + 1 : 0).filter(Boolean);
         if (needFiles.length) {
           return { ok: false, error: `\u7B2C ${needFiles.join("\u3001")} \u6B65\u8981\u4E0A\u4F20\u6587\u4EF6\uFF0C\u5148\u586B\u597D\u672C\u5730\u6587\u4EF6\u8DEF\u5F84`, needFiles };
+        }
+        if (where !== rec.origin) {
+          const startPath = rec.paths[0] || "/";
+          await ctx.call(
+            "browser.navigate",
+            { url: `${rec.origin}${startPath}`, tabId },
+            { timeoutMs: NAVIGATE_TIMEOUT_MS }
+          );
         }
         const steps = rec.steps.map((st, i) => {
           const value = String(st.value ?? "").replace(/\{\{\d+\}\}/g, (m) => values[m] ?? "");
@@ -5553,36 +5845,74 @@ plugin({
           favorited = true;
         }
         await save(ctx, FAVORITES_KEY, favorites, "favorites");
-        if (!favorited) {
-          const origin = originOfUrl(url);
+        const site = siteOf(url);
+        const siteTrusted = trustedSite(site);
+        if (!siteTrusted) {
           const before = runLog.length;
-          runLog = runLog.filter((r) => r.origin !== origin);
+          runLog = runLog.filter((r) => siteOf(r.origin) !== site);
           if (runLog.length !== before) {
             await save(ctx, SITE_RUNS_KEY, runLog, "site runs");
-            broadcast(ctx, "ui.siteRunsChanged", { origin });
+            broadcast(ctx, "ui.siteRunsChanged", { site });
           }
         }
         broadcast(ctx, "ui.favoritesChanged", { favorites });
-        if (url === urlKey(lastUrl)) pushUrl(ctx, lastUrl);
-        return { favorited, url };
+        if (lastUrl) pushUrl(ctx, lastUrl);
+        return {
+          favorited,
+          site,
+          siteTrusted,
+          siteFavoriteCount: favorites.filter((f) => siteOf(f.url) === site).length,
+          url
+        };
       }
       case "favorites.remove": {
         const url = urlKey(String(params.url ?? "").trim());
         if (!url) throw new Error("missing url");
         favorites = favorites.filter((f) => urlKey(f.url) !== url);
         await save(ctx, FAVORITES_KEY, favorites, "favorites");
+        const site = siteOf(url);
+        const siteTrusted = trustedSite(site);
+        if (!siteTrusted) {
+          const before = runLog.length;
+          runLog = runLog.filter((r) => siteOf(r.origin) !== site);
+          if (runLog.length !== before) {
+            await save(ctx, SITE_RUNS_KEY, runLog, "site runs");
+            broadcast(ctx, "ui.siteRunsChanged", { site });
+          }
+        }
         broadcast(ctx, "ui.favoritesChanged", { favorites });
-        if (url === urlKey(lastUrl)) pushUrl(ctx, lastUrl);
-        return { ok: true };
+        if (lastUrl) pushUrl(ctx, lastUrl);
+        return {
+          ok: true,
+          site,
+          siteTrusted,
+          siteFavoriteCount: favorites.filter((f) => siteOf(f.url) === site).length
+        };
+      }
+      case "favorites.untrustSite": {
+        const site = String(params.site ?? "").trim() || siteOf(String(params.url ?? lastUrl ?? ""));
+        if (!site) throw new Error("missing site");
+        const before = favorites.length;
+        favorites = favorites.filter((f) => siteOf(f.url) !== site);
+        await save(ctx, FAVORITES_KEY, favorites, "favorites");
+        const runsBefore = runLog.length;
+        runLog = runLog.filter((r) => siteOf(r.origin) !== site);
+        if (runLog.length !== runsBefore) await save(ctx, SITE_RUNS_KEY, runLog, "site runs");
+        broadcast(ctx, "ui.favoritesChanged", { favorites });
+        pushUrl(ctx, lastUrl);
+        return { ok: true, site, removed: before - favorites.length, siteTrusted: false };
       }
       case "siteMemory.list": {
         const url = String(params.url ?? lastUrl ?? "");
         const origin = originOfUrl(url);
+        const site = siteOf(url);
         return {
-          notes: notesFor(origin),
-          site: siteOf(url),
+          notes: notesForSite(site),
+          site,
           origin,
-          favorited: isFavoriteOrigin(origin)
+          favorited: trustedSite(site),
+          siteTrusted: trustedSite(site),
+          siteFavoriteCount: favorites.filter((f) => siteOf(f.url) === site).length
         };
       }
       case "siteMemory.add": {
@@ -5623,9 +5953,11 @@ plugin({
       case "siteMemory.runs": {
         const url = String(params.url ?? lastUrl ?? "");
         const origin = originOfUrl(url);
+        const site = siteOf(url);
         return {
-          runs: runLog.filter((r) => r.origin === origin).slice(0, 20),
-          origin
+          runs: runLog.filter((r) => siteOf(r.origin) === site).slice(0, 20),
+          origin,
+          site
         };
       }
       // ── Workflows: global, across sites ──
@@ -5667,17 +5999,29 @@ plugin({
       }
       /** Everything the memory center shows, in one round trip. */
       case "memory.overview": {
-        const origins = /* @__PURE__ */ new Set();
-        for (const f of favorites) origins.add(originOfUrl(f.url));
-        for (const n of siteNotes) origins.add(n.origin);
-        const sites = [...origins].filter(Boolean).map((origin) => ({
-          origin,
-          site: siteOf(origin),
-          favorited: isFavoriteOrigin(origin),
-          notes: notesFor(origin),
-          runs: runLog.filter((r) => r.origin === origin).slice(0, 10),
-          collections: collections.filter((c) => c.site === siteOf(origin))
-        })).sort(
+        const sitesSet = /* @__PURE__ */ new Set();
+        for (const f of favorites) {
+          const site = siteOf(f.url);
+          if (site) sitesSet.add(site);
+        }
+        for (const n of siteNotes) {
+          const site = n.site || siteOf(n.origin);
+          if (site) sitesSet.add(site);
+        }
+        for (const c of collections) if (c.site) sitesSet.add(c.site);
+        for (const r of recipes) if (r.site) sitesSet.add(r.site);
+        const sites = [...sitesSet].filter(Boolean).map((site) => {
+          const fav = favorites.find((f) => siteOf(f.url) === site);
+          const noteOrigin = siteNotes.find((n) => (n.site || siteOf(n.origin)) === site)?.origin;
+          return {
+            origin: fav?.url ?? noteOrigin ?? `https://${site}`,
+            site,
+            favorited: trustedSite(site),
+            notes: notesForSite(site),
+            runs: runLog.filter((r) => siteOf(r.origin) === site).slice(0, 10),
+            collections: collections.filter((c) => c.site === site)
+          };
+        }).sort(
           (a, b) => Number(b.favorited) - Number(a.favorited) || a.site.localeCompare(b.site)
         );
         return { sites, workflows, generatedAt: Date.now() };
@@ -5692,9 +6036,19 @@ plugin({
       case "collections.run": {
         const collection = collectionById(String(params.id ?? ""));
         if (!collection) return { ok: false, error: "\u91C7\u96C6\u914D\u65B9\u5DF2\u7ECF\u4E0D\u5728\u4E86" };
+        if (!trustedSite(collection.site)) {
+          return { ok: false, locked: true, error: `\u672C\u7AD9\u8FD8\u6CA1\u6536\u85CF\uFF1A\u6536\u85CF ${collection.site} \u540E\u624D\u80FD\u4F7F\u7528\u91C7\u96C6` };
+        }
+        const rawValues = params.values && typeof params.values === "object" ? params.values : {};
+        const values = {};
+        for (const k of Object.keys(rawValues)) {
+          values[k] = String(rawValues[k] ?? "");
+        }
         const tabId = targetTabId(key) ?? (await ensureTab(ctx, key)).id;
-        const result = await runCollection(ctx, collection, tabId);
-        await recordCollectionRun(ctx, collection, result.ok, result.error ?? "");
+        const result = await runCollection(ctx, collection, tabId, values);
+        if (!result.missing?.length) {
+          await recordCollectionRun(ctx, collection, result.ok, result.error ?? "");
+        }
         return { ...result, collection };
       }
       case "collections.remove": {
@@ -5726,7 +6080,7 @@ plugin({
       }
       default:
         throw new Error(
-          `unknown panel method: ${method} (known: nav.open, nav.back, nav.forward, nav.reload, state.get, omnibox.search, favorites.toggle, favorites.remove, history.clear, sel.theme, settings.setPrivate, settings.setSelPopup, tabs.new, tabs.activate, tabs.close, tabs.reorder, split.set, recipes.list, recipes.update, recipes.delete, recipes.run, siteMemory.list, siteMemory.add, siteMemory.update, siteMemory.remove, siteMemory.resolve, siteMemory.restore, siteMemory.runs, recipes.restore, workflows.list, workflows.add, workflows.update, workflows.remove, workflows.restore, collections.list, collections.run, collections.remove, memory.overview)`
+          `unknown panel method: ${method} (known: nav.open, nav.back, nav.forward, nav.reload, state.get, omnibox.search, favorites.toggle, favorites.remove, favorites.untrustSite, history.clear, sel.theme, settings.setPrivate, settings.setSelPopup, tabs.new, tabs.activate, tabs.close, tabs.reorder, split.set, recipes.list, recipes.update, recipes.promote, recipes.delete, recipes.run, siteMemory.list, siteMemory.add, siteMemory.update, siteMemory.remove, siteMemory.resolve, siteMemory.restore, siteMemory.runs, recipes.restore, workflows.list, workflows.add, workflows.update, workflows.remove, workflows.restore, collections.list, collections.run, collections.remove, memory.overview)`
         );
     }
   },
@@ -5866,8 +6220,33 @@ plugin({
 
 \uFF08\u9875\u9762\u5230 ${(result.slowMs / 1e3).toFixed(1)}s \u624D\u5C31\u7EEA\uFF0C\u7F51\u7EDC\u504F\u6162\uFF0C\u4F46\u5185\u5BB9\u5DF2\u7ECF\u52A0\u8F7D\uFF0C\u53EF\u4EE5\u76F4\u63A5\u7EE7\u7EED\u64CD\u4F5C\u3002\uFF09` : "";
         const head = `\u5DF2\u6253\u5F00 ${finalUrl}${result?.title ? ` \u2014 ${result.title}` : ""}${slowNote}`;
-        const memo = siteMemoryDigest(originOfUrl(finalUrl));
-        const injectKey = `${sessionKey ?? ""}|${originOfUrl(finalUrl)}`;
+        const origin = originOfUrl(finalUrl);
+        const site = siteOf(finalUrl);
+        let pageState = null;
+        if (trustedSite(site) || result?.page?.authKind) {
+          try {
+            pageState = await ctx.call("browser.getState", {
+              tabId: tab.id
+            });
+          } catch {
+          }
+        }
+        const snapshot = String(pageState?.snapshot ?? "");
+        const hasPassword = /type\s*=\s*["']?password/i.test(snapshot) || /password/i.test(snapshot) && /(textbox|input)/i.test(snapshot);
+        const path = pathOf(finalUrl);
+        const urlLooksLogin = /\/(login|signin|sign-in|newlogin|auth|passport|sso|session)(\/|$|[?#])/i.test(path) || /(^|\.)(login|signin|auth|passport)\./i.test(origin.replace(/^https?:\/\//, ""));
+        const titleLooksLogin = /\b(sign[ -]?in|log[ -]?in)\b|登录|登陆/i.test(
+          result?.title ?? ""
+        );
+        const hostAuth = result?.page?.authKind ?? null;
+        const looksLikeLogin = hasPassword || urlLooksLogin || titleLooksLogin;
+        const effectiveAuth = hostAuth === "captcha" ? "captcha" : looksLikeLogin ? "login" : null;
+        let card = "";
+        if (!effectiveAuth && pageState && trustedSite(site)) {
+          card = pageCardDigest(pageState.snapshot);
+        }
+        const memo = siteMemoryDigest(site, origin);
+        const injectKey = `${sessionKey ?? ""}|${site}`;
         if (memo.ids.length) {
           lastInjected.set(injectKey, { ids: memo.ids, at: Date.now() });
         } else {
@@ -5876,25 +6255,33 @@ plugin({
         const compose = /* @__PURE__ */ __name((body) => {
           const parts = [head];
           if (body) parts.push(body);
+          if (card) parts.push(card);
           if (memo.text) parts.push(memo.text);
           return parts.join("\n\n");
         }, "compose");
-        if (result?.page?.authKind === "captcha") {
+        if (effectiveAuth === "captcha") {
           return compose(
             "\u26A0\uFE0F \u8FD9\u4E2A\u9875\u9762\u9700\u8981\u4EBA\u5DE5\u5B8C\u6210\u4EBA\u673A\u9A8C\u8BC1\u3002\u8BF7\u5728\u53F3\u4FA7\u6D4F\u89C8\u5668\u9762\u677F\u91CC\u7531\u7528\u6237\u5B8C\u6210\uFF1B\u4E0D\u8981\u5C1D\u8BD5\u70B9\u51FB\u6216\u7ED5\u8FC7\u3002\u7528\u6237\u5B8C\u6210\u540E\u518D\u7EE7\u7EED\u3002"
           );
         }
-        if (result?.page?.authKind === "login") {
+        if (effectiveAuth === "login") {
           return compose(
             "\u26A0\uFE0F \u8FD9\u662F\u4E00\u4E2A\u767B\u5F55\u9875\u3002\u767B\u5F55\u5FC5\u987B\u7531\u7528\u6237\u5B8C\u6210\uFF08\u8D26\u53F7\u5BC6\u7801\u3001\u77ED\u4FE1\u9A8C\u8BC1\u7801\u3001\u626B\u7801\u90FD\u4E0D\u662F agent \u8BE5\u505A\u7684\uFF09\u3002\u8BF7\u5728\u53F3\u4FA7\u9762\u677F\u91CC\u7531\u7528\u6237\u767B\u5F55\uFF0C\u5B8C\u6210\u540E\u518D\u7EE7\u7EED\u3002"
           );
         }
         const here = pathOf(finalUrl);
-        const nearby = liveRecipes(originOfUrl(finalUrl)).map((r) => ({ r, rank: pathRank(r, here) })).sort((x, y) => x.rank - y.rank || y.r.lastOk - x.r.lastOk).slice(0, 5);
+        const nearby = (trustedSite(site) ? liveRecipes(site) : []).map((r) => ({
+          r,
+          rank: (r.origin === origin ? 0 : 10) + pathRank(r, here),
+          from: r.origin === origin ? "" : `\uFF0C\u5F55\u5236\u4E8E ${r.origin.replace(/^https?:\/\//, "")}`
+        })).sort((x, y) => x.rank - y.rank || y.r.lastOk - x.r.lastOk).slice(0, 5);
         if (nearby.length === 0) return compose("");
-        const where = /* @__PURE__ */ __name((rank) => rank === 0 ? "\uFF0C\u672C\u9875" : rank === 1 ? "\uFF0C\u540C\u680F\u76EE" : "", "where");
+        const where = /* @__PURE__ */ __name((rank) => {
+          const pathPart = rank >= 10 ? rank - 10 : rank;
+          return pathPart === 0 ? "\uFF0C\u672C\u9875" : pathPart === 1 ? "\uFF0C\u540C\u680F\u76EE" : "";
+        }, "where");
         return compose(
-          `\u672C\u7AD9\u6709 ${nearby.length} \u4E2A\u5DF2\u8BB0\u5F55\u7684\u5FEB\u6377\u64CD\u4F5C\uFF1A${nearby.map(({ r, rank }) => `${r.name}\uFF08${r.steps.length} \u6B65${where(rank)}\uFF09`).join("\u3001")}\u3002\u7528 browser_recipes \u67E5\u770B\u6B65\u9AA4\uFF0C\u518D\u6309 browser_act \u6267\u884C\uFF1B\u67D0\u4E00\u6B65\u7684\u9884\u671F\u5BF9\u4E0D\u4E0A\u5C31\u505C\u4E0B\u81EA\u5DF1\u64CD\u4F5C\u3002`
+          `\u672C\u7AD9\u6709 ${nearby.length} \u4E2A\u5DF2\u8BB0\u5F55\u7684\u5FEB\u6377\u64CD\u4F5C\uFF1A${nearby.map(({ r, rank, from }) => `${r.name}\uFF08${r.steps.length} \u6B65${where(rank)}${from}\uFF09`).join("\u3001")}\u3002\u7528 browser_recipes \u67E5\u770B\u6B65\u9AA4\uFF0C\u518D\u6309 browser_act \u6267\u884C\uFF1B\u67D0\u4E00\u6B65\u7684\u9884\u671F\u5BF9\u4E0D\u4E0A\u5C31\u505C\u4E0B\u81EA\u5DF1\u64CD\u4F5C\u3002`
         );
       }
       case "browser_tab_list": {
@@ -6026,6 +6413,7 @@ plugin({
               known.lastOk = Date.now();
               known.failures = 0;
               delete known.lastError;
+              promoteIfEarned(known);
               creditedId = known.id;
             } else {
               known.failures += 1;
@@ -6047,7 +6435,7 @@ plugin({
           );
         }
         const runOrigin = originOfUrl(state?.url ?? "");
-        const injection = lastInjected.get(`${sessionKey ?? ""}|${runOrigin}`);
+        const injection = lastInjected.get(`${sessionKey ?? ""}|${siteOf(runOrigin)}`);
         const injectedIds = injection && Date.now() - injection.at < INJECTION_TTL_MS ? injection.ids : [];
         await recordRun(ctx, {
           at: Date.now(),
@@ -6071,7 +6459,7 @@ plugin({
 \u2026(\u5FEB\u7167\u5DF2\u622A\u65AD,\u8981\u627E\u5177\u4F53\u5143\u7D20\u7528 browser_find)` : state.snapshot;
           lines.push("", "\u53EF\u4EA4\u4E92\u5143\u7D20:", snap);
         }
-        const hint = failedAt < 0 ? memoryLearningHint(sessionKey, originOfUrl(state?.url ?? ""), steps.length) : "";
+        const hint = failedAt < 0 ? memoryLearningHint(sessionKey, siteOf(state?.url ?? ""), steps.length) : "";
         return lines.join("\n") + hint;
       }
       case "browser_click": {
@@ -6201,17 +6589,18 @@ plugin({
         }
         return site.map((r) => {
           const stale = r.failures >= 2 ? " [\u5DF2\u5931\u6548]" : "";
+          const draft = r.status === "draft" ? " [\u8349\u7A3F\uFF1A\u53EA\u6210\u529F\u8FC7\u4E00\u6B21\uFF0C\u7B49\u7528\u6237\u786E\u8BA4\u6216\u518D\u6210\u529F\u4E00\u6B21\u624D\u542F\u7528]" : "";
           const broke = r.lastError ? `
   \u4E0A\u6B21\u5931\u8D25\u5728\u7B2C ${r.lastError.step} \u6B65\uFF1A${r.lastError.message}\uFF08${formatWhen(
             r.lastError.at
           )}\uFF09\uFF1B\u90A3\u4E00\u6B65\u591A\u534A\u5DF2\u7ECF\u53D8\u4E86\uFF0C\u53EF\u4EE5\u8DF3\u8FC7\u5B83\u81EA\u5DF1\u64CD\u4F5C\uFF0C\u6216\u8BA9\u7528\u6237\u4FEE\u8FD9\u6761\u914D\u65B9` : "";
           return [
-            `${r.name}\uFF08${r.site || r.origin}\uFF0C${r.paths && r.paths.length ? r.paths.join("\u3001") + " \xB7 " : ""}${r.steps.length} \u6B65\uFF0C\u7528\u8FC7 ${r.uses} \u6B21\uFF0C\u4E0A\u6B21\u6210\u529F ${formatWhen(r.lastOk)}\uFF09${stale}`,
+            `${r.name}\uFF08${r.site || r.origin}\uFF0C${r.paths && r.paths.length ? r.paths.join("\u3001") + " \xB7 " : ""}${r.steps.length} \u6B65\uFF0C\u7528\u8FC7 ${r.uses} \u6B21\uFF0C\u4E0A\u6B21\u6210\u529F ${formatWhen(r.lastOk)}\uFF09${stale}${draft}`,
             ...r.steps.map(
               (st, i) => `  ${i + 1}. ${st.kind} ${prettyTarget(st.target)}${st.value ? ` = ${st.value}` : ""}${st.expect ? ` \uFF5C\u9884\u671F\uFF1A${st.expect}` : ""}`
             )
           ].join("\n") + broke;
-        }).join("\n\n") + "\n\n\u6309 browser_act \u7684\u683C\u5F0F\u6267\u884C\uFF0C\u628A {{n}} \u6362\u6210\u8FD9\u6B21\u7684\u5B9E\u9645\u503C\uFF1B\u67D0\u4E00\u6B65\u7684\u9884\u671F\u5BF9\u4E0D\u4E0A\u5C31\u7ACB\u523B\u505C\u4E0B\u3001\u81EA\u5DF1\u91CD\u65B0\u64CD\u4F5C\u3002";
+        }).join("\n\n") + "\n\n\u6309 browser_act \u7684\u683C\u5F0F\u6267\u884C\uFF0C\u628A {{n}} \u6362\u6210\u8FD9\u6B21\u7684\u5B9E\u9645\u503C\uFF1B\u67D0\u4E00\u6B65\u7684\u9884\u671F\u5BF9\u4E0D\u4E0A\u5C31\u7ACB\u523B\u505C\u4E0B\u3001\u81EA\u5DF1\u91CD\u65B0\u64CD\u4F5C\u3002\u6807\u4E86\u300C\u8349\u7A3F\u300D\u7684\u4E0D\u8981\u81EA\u52A8\u6267\u884C\uFF1A\u5B83\u53EA\u6210\u529F\u8FC7\u4E00\u6B21\uFF0C\u5148\u8BA9\u7528\u6237\u5728\u9762\u677F\u91CC\u786E\u8BA4\u3002";
       }
       case "browser_recipe_delete": {
         const name2 = String(params.name ?? "").trim();
@@ -6245,9 +6634,9 @@ plugin({
         const url = rawUrl ? normalizeUrl(rawUrl) : lastUrl;
         const origin = originOfUrl(url);
         if (!origin) throw new Error("\u8FD8\u6CA1\u6709\u6253\u5F00\u7684\u7F51\u9875\uFF1A\u5148 browser_navigate\uFF0C\u6216\u4F20 url");
-        const mine = notesFor(origin);
         const site = siteOf(url) || origin;
-        const favorited = isFavoriteOrigin(origin);
+        const mine = notesForSite(site);
+        const favorited = trustedSite(site);
         if (action === "list") {
           if (mine.length === 0) {
             return `\u7528\u6237\u8FD8\u6CA1\u6709\u7ED9 ${site} \u5199\u8FC7\u672C\u7AD9\u8BB0\u5FC6\u3002` + (favorited ? '\u53EF\u4EE5\u5728\u6D4F\u89C8\u5668\u9762\u677F\u5730\u5740\u680F\u4E0B\u62C9\u7684\u300C\u672C\u7AD9\u8BB0\u5FC6\u300D\u91CC\u5199\uFF1B\u4ED6\u660E\u786E\u8BA9\u4F60\u8BB0\u65F6\uFF0C\u4E5F\u53EF\u4EE5\u7528 action:"add" \u8BB0\u4E00\u6761\u3002' : "\uFF08\u672C\u7AD9\u672A\u6536\u85CF\uFF0C\u5199\u4E86\u6682\u65F6\u4E5F\u4E0D\u4F1A\u63D0\u4F9B\u7ED9\u4F60\u3002\uFF09");
@@ -6372,15 +6761,18 @@ ${lines.join("\n")}`;
           return collections.map((c, i) => {
             const fields = c.list.fields.map((f) => f.key).join(" / ");
             const detailFields = c.detail ? `\uFF0C\u8FDB\u524D ${c.detail.count} \u6761\u53D6 ${c.detail.fields.map((f) => f.key).join(" / ")}` : "";
-            const status = c.failures >= 2 ? " [\u5DF2\u5931\u6548]" : c.lastError ? ` [\u4E0A\u6B21\u5931\u8D25\uFF1A${c.lastError.message}]` : c.lastOk ? ` [\u4E0A\u6B21\u6210\u529F ${formatWhen(c.lastOk)}]` : "";
-            return `${i + 1}. [${c.id}] ${c.name}\uFF08${c.site} \xB7 \u5217\u8868\u53D6 ${fields}${detailFields} \xB7 \u7528\u8FC7 ${c.uses} \u6B21\uFF09${status}
+            const locked = trustedSite(c.site) ? "" : " [\u672A\u6388\u6743\uFF1A\u5148\u6536\u85CF\u672C\u7AD9]";
+            const status = (c.failures >= 2 ? " [\u5DF2\u5931\u6548]" : c.lastError ? ` [\u4E0A\u6B21\u5931\u8D25\uFF1A${c.lastError.message}]` : c.lastOk ? ` [\u4E0A\u6B21\u6210\u529F ${formatWhen(c.lastOk)}]` : "") + locked;
+            const paramNames = c.params ?? collectionUrlParams(c.url);
+            const paramNote = paramNames.length ? ` \xB7 \u53C2\u6570 ${paramNames.join(" / ")}\uFF08run \u65F6\u4F20 values\uFF09` : "";
+            return `${i + 1}. [${c.id}] ${c.name}\uFF08${c.site} \xB7 \u5217\u8868\u53D6 ${fields}${detailFields} \xB7 \u7528\u8FC7 ${c.uses} \u6B21${paramNote}\uFF09${status}
    ${c.url}`;
           }).join("\n") + '\n\n\u7528 action:"run" \u548C id \u8FD0\u884C\uFF1A\u5B83\u5728\u6D4F\u89C8\u5668\u91CC\u771F\u5B9E\u5BFC\u822A\u5E76\u53EA\u8FD4\u56DE\u8FD9\u4E9B\u5B57\u6BB5\uFF0C\u4E0D\u4EA7\u751F\u9875\u9762\u5FEB\u7167\u3002\u8BFB\u89C4\u5219\uFF1A\u5217\u8868\u5B57\u6BB5\u53D6\u4E0D\u5230\u5C31\u505C\u4E0B\u68C0\u67E5\u9009\u62E9\u5668\uFF1B\u8FDE\u7EED\u5931\u8D25\u4E24\u6B21\u4F1A\u6807\u4E3A\u5931\u6548\u3002';
         }
         if (action === "add") {
           const collection = await addCollection(ctx, params, by);
           return `\u5DF2\u4FDD\u5B58\u91C7\u96C6\u914D\u65B9\u300C${collection.name}\u300D\uFF08${collection.site}\uFF09\uFF1A\u5217\u8868 ${collection.list.fields.map((f) => f.key).join(" / ")}${collection.detail ? `\uFF0C\u8FDB\u524D ${collection.detail.count} \u6761\u53D6 ${collection.detail.fields.map((f) => f.key).join(" / ")}` : ""}\u3002
-\u7ACB\u523B\u7528 action:"run" id:"${collection.id}" \u8DD1\u4E00\u6B21\u9A8C\u8BC1\uFF1B\u53D6\u4E0D\u5230\u6570\u636E\u5C31 update \u9009\u62E9\u5668\uFF0C\u4E0D\u8981\u7559\u7740\u574F\u914D\u65B9\u3002\u7528\u6237\u53EF\u4EE5\u5728\u6D4F\u89C8\u5668\u5730\u5740\u680F\u4E0B\u62C9\u7684\u300C\u91C7\u96C6\u300D\u91CC\u4E00\u952E\u8FD0\u884C\u548C\u5220\u9664\u3002`;
+\u7ACB\u523B\u7528 action:"run" id:"${collection.id}" \u8DD1\u4E00\u6B21\u9A8C\u8BC1\uFF1B\u53D6\u4E0D\u5230\u6570\u636E\u5C31 update \u9009\u62E9\u5668\uFF0C\u4E0D\u8981\u7559\u7740\u574F\u914D\u65B9\u3002` + (collection.params?.length ? `\u8FD9\u6761 URL \u5E26\u53C2\u6570 ${collection.params.join(" / ")}\uFF0C\u8FD0\u884C\u65F6\u7528 values:{${collection.params.map((p) => `"${p}": "\u2026"`).join(", ")}} \u586B\u503C\u3002` : "") + "\u7528\u6237\u53EF\u4EE5\u5728\u6D4F\u89C8\u5668\u5730\u5740\u680F\u4E0B\u62C9\u7684\u300C\u91C7\u96C6\u300D\u91CC\u4E00\u952E\u8FD0\u884C\u548C\u5220\u9664\u3002";
         }
         if (action === "update") {
           const collection = await updateCollection(ctx, String(params.id ?? ""), params);
@@ -6393,8 +6785,19 @@ ${lines.join("\n")}`;
         if (action === "run") {
           const collection = collectionById(String(params.id ?? ""));
           if (!collection) throw new Error("\u6CA1\u6709\u627E\u5230\u8FD9\u4E2A\u91C7\u96C6\u914D\u65B9");
+          if (!trustedSite(collection.site)) {
+            return `\u91C7\u96C6\u300C${collection.name}\u300D\u5C5E\u4E8E ${collection.site}\uFF0C\u4F46\u8FD9\u4E2A\u7AD9\u8FD8\u6CA1\u6536\u85CF\u3002\u5148\u8BF7\u7528\u6237\u5728\u6D4F\u89C8\u5668\u91CC\u6536\u85CF\u8BE5\u7AD9\uFF0C\u518D\u8FD0\u884C\u3002`;
+          }
+          const rawValues = params.values && typeof params.values === "object" ? params.values : {};
+          const values = {};
+          for (const k of Object.keys(rawValues)) {
+            values[k] = String(rawValues[k] ?? "");
+          }
           const tab = tid ? { id: tid } : await ensureTab(ctx, bucketKey(sessionKey));
-          const result = await runCollection(ctx, collection, tab.id);
+          const result = await runCollection(ctx, collection, tab.id, values);
+          if (result.missing?.length) {
+            return `\u91C7\u96C6\u300C${collection.name}\u300D\u8FD8\u9700\u8981\u53C2\u6570\uFF1A${result.missing.join("\u3001")}\u3002\u628A values \u4F20\u6210 {"${result.missing[0]}": "\u2026"} \u518D\u8DD1\u3002`;
+          }
           await recordCollectionRun(ctx, collection, result.ok, result.error ?? "");
           if (!result.ok) {
             return `\u91C7\u96C6\u300C${collection.name}\u300D\u5931\u8D25\uFF1A${result.error}

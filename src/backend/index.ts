@@ -37,6 +37,9 @@
  */
 import { plugin, type PluginContext } from '@pi/plugin-sdk';
 import { getDomain } from 'tldts';
+// Starter site recipes. Data, not code: each row is editable/deletable in the
+// panel, and the engine has no per-site branch anywhere.
+import presets from './presets.json';
 import {
   PageTranslator,
   buildArticlePayload,
@@ -59,6 +62,14 @@ const NAVIGATE_TIMEOUT_MS = 60_000;
  * browser_find is the precise instrument for anything cut off.
  */
 const SNAPSHOT_MAX_CHARS = 8_000;
+
+/**
+ * Navigation hands the agent the page's actionable elements, not the whole
+ * snapshot. The list is a starting point for its own plan — enough to know
+ * what is on screen without paying for a full browser_get_state round trip.
+ */
+const PAGE_CARD_MAX_LINES = 12;
+const PAGE_CARD_MAX_CHARS = 900;
 
 // ── Omnibox data (plugin-private storage) ────────────────────────────────
 
@@ -96,6 +107,9 @@ const INJECTION_TTL_MS = 30 * 60_000;
 /** Revisions kept per note; old ones fall off the back. */
 const NOTE_REVISIONS_MAX = 10;
 
+/** Recipes kept in total; drafts are evicted before confirmed ones. */
+const RECIPES_MAX = 60;
+
 /**
  * Workflows: named, user-owned routines that span sites ("export orders here,
  * import them there"). A workflow is a readable checklist that points at
@@ -116,6 +130,8 @@ const WORKFLOW_REVISIONS_MAX = 10;
  * it fresh.
  */
 const COLLECTIONS_KEY = 'collections.items';
+/** Ids of starter recipes already offered once; deleting one is remembered. */
+const PRESETS_APPLIED_KEY = 'presets.applied';
 const COLLECTIONS_MAX = 50;
 const COLLECT_FIELDS_MAX = 12;
 const COLLECT_ROWS_MAX = 50;
@@ -249,6 +265,15 @@ interface Recipe {
   name: string;
   params: number;
   steps: RecipeStep[];
+  /**
+   * Auto-recorded operations start as drafts: they are visible in the panel
+   * but never offered to the agent until they earn it (a second identical
+   * success) or the user confirms them. Legacy recipes count as active.
+   */
+  status?: 'draft' | 'active';
+  /** When and why it became active, for the panel's label. */
+  confirmedAt?: number;
+  confirmedBy?: 'user' | 'repeat';
   uses: number;
   lastOk: number;
   /** Consecutive failed re-runs; two marks the recipe stale. */
@@ -383,8 +408,10 @@ interface Collection {
   origin: string;
   site: string;
   name: string;
-  /** The page opened first. */
+  /** The page opened first. `{{name}}` placeholders are filled at run time. */
   url: string;
+  /** Placeholder names found in `url`, e.g. ['关键词']; empty when fixed. */
+  params?: string[];
   list: {
     /** CSS of one row; '' reads a single record from the page. */
     scope: string;
@@ -402,7 +429,7 @@ interface Collection {
     /** How many of the first rows to open. */
     count: number;
   };
-  createdBy: 'user' | 'agent';
+  createdBy: 'user' | 'agent' | 'preset';
   createdAt: number;
   updatedAt: number;
   uses: number;
@@ -1049,7 +1076,15 @@ function pushHostState(ctx: PluginContext, hostTabId: string): void {
   ctx.send(
     'browser',
     'ui.urlChanged',
-    { url, title, favorited: isFavorite(url), private: privateMode },
+    {
+      url,
+      title,
+      favorited: isFavorite(url),
+      site: siteOf(url),
+      siteTrusted: trustedSite(siteOf(url)),
+      siteFavoriteCount: favorites.filter((f) => siteOf(f.url) === siteOf(url)).length,
+      private: privateMode,
+    },
     hostTabId,
   );
 }
@@ -1129,7 +1164,15 @@ async function syncBucket(ctx: PluginContext): Promise<void> {
     // keep showing the previous conversation's page.
     lastUrl = '';
     for (const panelId of panelTargets()) {
-      ctx.send(panelId, 'ui.urlChanged', { url: '', title: '', favorited: false, private: privateMode });
+      ctx.send(panelId, 'ui.urlChanged', {
+        url: '',
+        title: '',
+        favorited: false,
+        site: '',
+        siteTrusted: false,
+        siteFavoriteCount: 0,
+        private: privateMode,
+      });
     }
   }
 }
@@ -1384,21 +1427,27 @@ function pathRank(recipe: Recipe, currentPath: string): number {
   return 2;
 }
 
-/** Favoriting is the consent: only favorited sites keep recipes. */
-function isFavoriteOrigin(origin: string): boolean {
-  return !!origin && favorites.some((f) => originOfUrl(f.url) === origin);
+/**
+ * Consent is per SITE (registrable domain), not per page or per origin: one
+ * bookmark on bilibili.com covers www/search/live, because that is what "I
+ * use Bilibili" means to a person. The bookmark list stays page-level; this
+ * is the permission layer.
+ */
+function trustedSite(site: string): boolean {
+  return !!site && favorites.some((f) => siteOf(f.url) === site);
 }
 
 // ── Site memory: what the user taught us about this site ─────────────────
 
-function notesFor(origin: string): SiteNote[] {
-  return origin ? siteNotes.filter((n) => n.origin === origin) : [];
+function notesForSite(site: string): SiteNote[] {
+  // Older rows may lack `site`; derive it so a migration needs no rewrite.
+  return site ? siteNotes.filter((n) => (n.site || siteOf(n.origin)) === site) : [];
 }
 
-function liveNotes(origin: string): SiteNote[] {
+function liveNotes(site: string): SiteNote[] {
   // Suspect notes are paused on purpose: once the page has contradicted one,
   // feeding it back before the user decides is how a wrong fact compounds.
-  return notesFor(origin).filter((n) => n.enabled !== false && !n.suspect);
+  return notesForSite(site).filter((n) => n.enabled !== false && !n.suspect);
 }
 
 /**
@@ -1408,10 +1457,10 @@ function liveNotes(origin: string): SiteNote[] {
  * nothing. Capped twice (count and characters): this rides on every
  * navigation here, which is exactly where token cost lives.
  */
-function siteMemoryDigest(origin: string): { text: string; ids: string[] } {
+function siteMemoryDigest(site: string, origin: string): { text: string; ids: string[] } {
   const empty = { text: '', ids: [] as string[] };
-  if (!isFavoriteOrigin(origin)) return empty;
-  const notes = liveNotes(origin);
+  if (!trustedSite(site)) return empty;
+  const notes = liveNotes(site);
   if (notes.length === 0) return empty;
   const shown: SiteNote[] = [];
   let used = 0;
@@ -1426,10 +1475,89 @@ function siteMemoryDigest(origin: string): { text: string; ids: string[] } {
     ids: shown.map((n) => n.id),
     text:
       `【本站记忆 · ${notes.length} 条${pending > 0 ? `，其中 ${pending} 条未确认` : ''}，用户沉淀的长期知识】\n` +
-      shown.map((n) => `- ${n.text}${n.verified === false ? '（AI 观察，未确认）' : ''}`).join('\n') +
+      shown
+        .map((n) => {
+          const from =
+            n.origin && n.origin !== origin
+              ? `（来自 ${n.origin.replace(/^https?:\/\//, '')}）`
+              : '';
+          return `- ${n.text}${from}${n.verified === false ? '（AI 观察，未确认）' : ''}`;
+        })
+        .join('\n') +
       (rest > 0 ? `\n（另有 ${rest} 条，用 browser_site_memory 查看）` : '') +
       '\n这是记忆，不是当前页面的实时状态：与页面不符时以页面为准，用 browser_site_memory 的 dispute 报告哪条不对（它会被标为可疑、暂停提供）。',
   };
+}
+
+/**
+ * A compact, on-demand element card for the page just opened. It is a seed for
+ * the agent's own planning, not a recorded path: only the controls and their
+ * refs, capped hard, so it can afford to ride on every navigation of a
+ * favorited site. Effects are learned separately; nothing here claims what a
+ * click will do.
+ */
+function pageCardDigest(snapshot: string | undefined): string {
+  const lines = String(snapshot ?? '')
+    .replace(/\r/g, '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length === 0) return '';
+
+  // The host has two snapshot shapes: `[12] link "text" [attr]` and the
+  // older `[button] "text" ref=[12]`. Detect both; a card that only knows one
+  // silently goes empty on half the pages.
+  const elements = lines.filter((line) => /ref=|^\[\d+\]/.test(line));
+  const pool = elements.length > 0 ? elements : lines;
+
+  const quoted = (line: string): string =>
+    (line.match(/["“]([^"”\n]{1,160})["”]/) ?? [])[1] ?? '';
+  const isControl = (line: string): boolean =>
+    /(?:^|[^a-z])(button|textbox|combobox|checkbox|radio|switch|input)(?:[^a-z]|$)/i.test(line);
+  const score = (line: string): number => {
+    const text = quoted(line);
+    let value = 0;
+    // Content-rich lines (result titles, item names) beat short chrome.
+    value += Math.min(text.length, 80) / 8;
+    // Real controls are what the agent can act on even when unlabeled.
+    if (isControl(line)) value += 8;
+    if (text) value += 1;
+    // Elements out of the current viewport are still useful, just later.
+    if (/below-fold/i.test(line)) value -= 1.5;
+    return value;
+  };
+
+  // Two pools, because a page like a search result has twenty short nav links
+  // and a dozen long results: taking the top 12 by score would still hand back
+  // mostly chrome. Content and controls first; a few short labels only fill
+  // the space left, so the card stays a map of what matters, not a nav dump.
+  const rich: Array<{ line: string; index: number; score: number }> = [];
+  const chrome: Array<{ line: string; index: number; score: number }> = [];
+  pool.forEach((line, index) => {
+    const entry = { line, index, score: score(line) };
+    (isControl(line) || quoted(line).length >= 6 ? rich : chrome).push(entry);
+  });
+  rich.sort((a, b) => b.score - a.score || a.index - b.index);
+  chrome.sort((a, b) => b.score - a.score || a.index - b.index);
+  const selected = [
+    ...rich.slice(0, PAGE_CARD_MAX_LINES),
+    ...chrome.slice(0, Math.min(4, Math.max(0, PAGE_CARD_MAX_LINES - rich.length))),
+  ]
+    // Keep the page's own order: a card sorted by score reads like noise.
+    .sort((a, b) => a.index - b.index);
+
+  let body = '';
+  for (const { line } of selected) {
+    const clipped = line.length > 140 ? `${line.slice(0, 140)}…` : line;
+    const next = body ? `${body}\n${clipped}` : clipped;
+    if (next.length > PAGE_CARD_MAX_CHARS) break;
+    body = next;
+  }
+  if (!body) return '';
+  return (
+    '【本页速查 · 按可操作性和正文内容挑选，不是整页；ref 可直接用于 browser_click / browser_fill，完整结构用 browser_get_state】\n' +
+    body
+  );
 }
 
 /**
@@ -1438,17 +1566,17 @@ function siteMemoryDigest(origin: string): { text: string; ids: string[] } {
  * waiting (an inbox the model fills faster than a person can empty is noise),
  * and the user must have favorited the site — favoriting is the consent.
  */
-function memoryLearningHint(sessionKey: string | null, origin: string, stepCount: number): string {
-  if (stepCount < 2 || !origin || !isFavoriteOrigin(origin)) return '';
-  if (notesFor(origin).some((n) => n.verified === false)) return '';
-  const key = `${sessionKey ?? ''}|${origin}`;
+function memoryLearningHint(sessionKey: string | null, site: string, stepCount: number): string {
+  if (stepCount < 2 || !site || !trustedSite(site)) return '';
+  if (notesForSite(site).some((n) => n.verified === false)) return '';
+  const key = `${sessionKey ?? ''}|${site}`;
   if (memoryNudged.has(key)) return '';
   // A long-lived process can see many conversations; the set is only a "said
   // this already" guard, so dropping it wholesale is harmless.
   if (memoryNudged.size > 1000) memoryNudged.clear();
   memoryNudged.add(key);
   return (
-    '\n\n（本站已收藏：如果这次操作里有一条下次能省事的、可验证的事实——入口在哪、字段叫什么、操作后页面怎么变——' +
+    '\n\n（本站已授权：如果这次操作里有一条下次能省事的、可验证的事实——入口在哪、字段叫什么、操作后页面怎么变——' +
     '可以用 browser_site_memory 记一条，用户在面板里确认后转正；判断性的规矩不要自己写。）'
   );
 }
@@ -1473,9 +1601,10 @@ async function addSiteNote(
 ): Promise<SiteNote> {
   const origin = originOfUrl(url);
   if (!origin) throw new Error('这个页面还没有网址，先打开一个网页');
+  const site = siteOf(url);
   const clean = normalizeNoteText(text);
   if (!clean) throw new Error('写一句这个网站的用途或注意事项');
-  const mine = notesFor(origin);
+  const mine = notesForSite(site);
   if (mine.length >= SITE_NOTES_MAX) {
     throw new Error(`本站记忆已经有 ${SITE_NOTES_MAX} 条，先删掉一些再记`);
   }
@@ -1483,7 +1612,7 @@ async function addSiteNote(
   const note: SiteNote = {
     id: newNoteId(),
     origin,
-    site: siteOf(url),
+    site,
     text: clean,
     by,
     // A person's own sentence is confirmed by definition; the agent's is a
@@ -1608,7 +1737,7 @@ async function recordRun(
   ctx: PluginContext,
   run: Omit<RunRecord, 'id'>,
 ): Promise<void> {
-  if (!isFavoriteOrigin(run.origin)) return;
+  if (!trustedSite(siteOf(run.origin))) return;
   const record: RunRecord = {
     id: `x${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`,
     ...run,
@@ -1779,8 +1908,19 @@ function normalizeCollectFields(input: unknown): CollectField[] {
 interface CollectionSpecInput {
   name: string;
   url: string;
+  params: string[];
   list: { scope: string; fields: CollectField[]; limit: number };
   detail?: { urlField: string; fields: CollectField[]; waitFor?: string; count: number };
+}
+
+/** Distinct `{{name}}` placeholders in a collection URL, in order. */
+function collectionUrlParams(url: string): string[] {
+  const out: string[] = [];
+  for (const match of String(url).matchAll(/\{\{([^{}]+)\}\}/g)) {
+    const name = match[1].trim();
+    if (name && !out.includes(name)) out.push(name);
+  }
+  return out;
 }
 
 function collectionSpecFrom(input: Record<string, unknown>): CollectionSpecInput {
@@ -1813,7 +1953,13 @@ function collectionSpecFrom(input: Record<string, unknown>): CollectionSpecInput
       };
     }
   }
-  return { name, url, list: { scope, fields, limit }, ...(detail ? { detail } : {}) };
+  return {
+    name,
+    url,
+    params: collectionUrlParams(url),
+    list: { scope, fields, limit },
+    ...(detail ? { detail } : {}),
+  };
 }
 
 /**
@@ -1883,6 +2029,8 @@ interface CollectionRun {
   list: Array<Record<string, string>>;
   details: Array<{ url: string; fields: Record<string, string> }>;
   error?: string;
+  /** Placeholders the caller still has to fill, when the URL is a template. */
+  missing?: string[];
   ms: number;
 }
 
@@ -1892,6 +2040,11 @@ async function addCollection(
   by: 'user' | 'agent',
 ): Promise<Collection> {
   const spec = collectionSpecFrom(input);
+  if (!trustedSite(siteOf(spec.url))) {
+    throw new Error(
+      `本站还没收藏：先在浏览器里收藏 ${siteOf(spec.url) || '这个站'}，才能建采集配方`,
+    );
+  }
   if (collections.length >= COLLECTIONS_MAX) {
     throw new Error(`采集配方已经有 ${COLLECTIONS_MAX} 个，先删掉一些`);
   }
@@ -1902,6 +2055,7 @@ async function addCollection(
     site: siteOf(spec.url),
     name: spec.name,
     url: spec.url,
+    params: spec.params,
     list: spec.list,
     ...(spec.detail ? { detail: spec.detail } : {}),
     createdBy: by,
@@ -1914,6 +2068,54 @@ async function addCollection(
   await save(ctx, COLLECTIONS_KEY, collections, 'collections');
   broadcast(ctx, 'ui.collectionsChanged', { id: collection.id });
   return collection;
+}
+
+/**
+ * Offer the starter recipes once. They are ordinary collections created with
+ * `createdBy: 'preset'`: editable, deletable, health-tracked like any other.
+ * Applied ids persist, so deleting one does not bring it back on next launch.
+ */
+async function seedPresets(ctx: PluginContext): Promise<void> {
+  const appliedRaw = await readKey(ctx, PRESETS_APPLIED_KEY);
+  const applied = new Set(Array.isArray(appliedRaw) ? appliedRaw.map((x) => String(x)) : []);
+  let changed = false;
+  for (const raw of presets as Array<Record<string, unknown>>) {
+    const id = String(raw.id ?? '');
+    if (!id || applied.has(id)) continue;
+    if (collections.some((c) => c.id === id)) {
+      applied.add(id);
+      changed = true;
+      continue;
+    }
+    if (collections.length >= COLLECTIONS_MAX) break;
+    try {
+      const spec = collectionSpecFrom(raw);
+      const now = Date.now();
+      collections.push({
+        id,
+        origin: originOfUrl(spec.url),
+        site: siteOf(spec.url),
+        name: spec.name,
+        url: spec.url,
+        params: spec.params,
+        list: spec.list,
+        ...(spec.detail ? { detail: spec.detail } : {}),
+        createdBy: 'preset',
+        createdAt: now,
+        updatedAt: now,
+        uses: 0,
+        failures: 0,
+      });
+    } catch (err) {
+      ctx.log.warn(`preset ${id} skipped: ${describe(err)}`);
+    }
+    applied.add(id);
+    changed = true;
+  }
+  if (changed) {
+    await save(ctx, COLLECTIONS_KEY, collections, 'collections');
+    await save(ctx, PRESETS_APPLIED_KEY, [...applied], 'presets');
+  }
 }
 
 async function updateCollection(
@@ -1933,6 +2135,7 @@ async function updateCollection(
   });
   collection.name = spec.name;
   collection.url = spec.url;
+  collection.params = spec.params;
   collection.origin = originOfUrl(spec.url);
   collection.site = siteOf(spec.url);
   collection.list = spec.list;
@@ -1987,6 +2190,7 @@ async function runCollection(
   ctx: PluginContext,
   collection: Collection,
   tid: string | undefined,
+  values: Record<string, string> = {},
 ): Promise<CollectionRun> {
   const started = Date.now();
   const tabArg = tid ? { tabId: tid } : {};
@@ -2001,8 +2205,23 @@ async function runCollection(
     ms: Date.now() - started,
   });
 
+  // A URL may carry `{{name}}` blanks; they are filled per run, so one recipe
+  // works for every keyword instead of being rebuilt for each one.
+  const wanted = collection.params ?? collectionUrlParams(collection.url);
+  const missing = wanted.filter((name) => !String(values[name] ?? '').trim());
+  if (missing.length > 0) {
+    return {
+      ...fail(`缺少参数：${missing.join('、')}`),
+      missing,
+    };
+  }
+  const targetUrl = collection.url.replace(/\{\{([^{}]+)\}\}/g, (match, rawName) => {
+    const name = String(rawName).trim();
+    return String(values[name] ?? '').trim() || match;
+  });
+
   try {
-    await go(collection.url);
+    await go(targetUrl);
   } catch (err) {
     return fail(zhError(err instanceof Error ? err.message : String(err)));
   }
@@ -2096,8 +2315,20 @@ function recipeStepsKey(steps: RecipeStep[]): string {
 }
 
 /** Recipes still worth offering: two consecutive failures retires one. */
-function liveRecipes(origin: string): Recipe[] {
-  return recipes.filter((r) => r.origin === origin && r.failures < 2);
+function liveRecipes(site: string): Recipe[] {
+  return recipes.filter((r) => r.site === site && r.status !== 'draft' && r.failures < 2);
+}
+
+/**
+ * A draft turns active after a second identical success. Deliberately not on
+ * the first: one successful run can be an accident (a one-off modal, a lucky
+ * path), and an unverified path offered to the agent is worse than none.
+ */
+function promoteIfEarned(recipe: Recipe): void {
+  if (recipe.status !== 'draft' || recipe.uses < 2) return;
+  recipe.status = 'active';
+  recipe.confirmedAt = Date.now();
+  recipe.confirmedBy = 'repeat';
 }
 
 /**
@@ -2176,7 +2407,7 @@ async function recordRecipe(
   creditedId?: string | null,
 ): Promise<Recipe | null> {
   const origin = originOfUrl(url ?? '');
-  if (!origin || !isFavoriteOrigin(origin)) return null;
+  if (!origin || !trustedSite(siteOf(url ?? ''))) return null;
 
   const steps: RecipeStep[] = [];
   // Recorded values, so expectations can be made parameter-agnostic: an
@@ -2223,7 +2454,10 @@ async function recordRecipe(
       steps.push({ kind: 'wait', target: String(step.wait), expect });
     }
   }
-  if (steps.length === 0) return null;
+  // A single click is not an operation worth remembering: the page card
+  // already shows every control, and one-click "recipes" would bury real
+  // multi-step knowledge. This is a site-agnostic rule, not a site list.
+  if (steps.length < 2) return null;
 
   // Expectations must survive a different input. Fill/select get a generic
   // sentence instead of string surgery; page-text effects only swap values
@@ -2247,6 +2481,20 @@ async function recordRecipe(
   const existing = recipes.find((r) => r.origin === origin && recipeSignature(r.steps) === signature);
   const path = pathOf(url ?? '');
   if (existing) {
+    // A success may teach a better expectation for the same steps. Keep the
+    // previous version first — a silent overwrite is how a good recipe
+    // becomes an untraceable one.
+    if (recipeStepsKey(existing.steps) !== recipeStepsKey(steps)) {
+      existing.revisions = [
+        ...(existing.revisions ?? []),
+        {
+          at: Date.now(),
+          by: 'agent',
+          name: existing.name,
+          steps: existing.steps.map((s) => ({ ...s })),
+        },
+      ].slice(-NOTE_REVISIONS_MAX);
+    }
     existing.steps = steps;
     if (existing.id !== creditedId) existing.uses += 1;
     existing.lastOk = Date.now();
@@ -2254,6 +2502,7 @@ async function recordRecipe(
     delete existing.lastError;
     existing.paths = [path, ...existing.paths.filter((p) => p !== path)].slice(0, 3);
     if (name) existing.name = name;
+    promoteIfEarned(existing);
     await save(ctx, RECIPES_KEY, recipes, 'recipes');
     return existing;
   }
@@ -2266,11 +2515,17 @@ async function recordRecipe(
     name: (name ?? '').trim() || (title ?? '此站操作').slice(0, 24),
     params,
     steps,
+    status: 'draft',
     uses: 1,
     lastOk: Date.now(),
     failures: 0,
   };
-  recipes = [recipe, ...recipes].slice(0, 60);
+  recipes = [recipe, ...recipes];
+  // The cap prefers dropping an unreviewed draft over a confirmed recipe.
+  if (recipes.length > RECIPES_MAX) {
+    const draftIndex = recipes.findLastIndex((r) => r.status === 'draft');
+    recipes.splice(draftIndex >= 0 ? draftIndex : recipes.length - 1, 1);
+  }
   await save(ctx, RECIPES_KEY, recipes, 'recipes');
   return recipe;
 }
@@ -2445,6 +2700,20 @@ async function loadState(ctx: PluginContext): Promise<void> {
         paths: Array.isArray(x.paths) ? x.paths : [],
         uses: x.uses ?? 0,
         failures: x.failures ?? 0,
+        // Trust is earned, not inherited: a recipe is live only if it was
+        // confirmed (by the user or a second success) or hand-edited. Older
+        // auto-recorded recipes — including ones a previous build stamped
+        // "active" without asking — wait as drafts for review.
+        status:
+          x.status === 'draft'
+            ? ('draft' as const)
+            : Number(x.confirmedAt) > 0 || revisions.length > 0
+              ? ('active' as const)
+              : ('draft' as const),
+        ...(Number(x.confirmedAt) ? { confirmedAt: Number(x.confirmedAt) } : {}),
+        ...(x.confirmedBy === 'repeat' || x.confirmedBy === 'user'
+          ? { confirmedBy: x.confirmedBy }
+          : {}),
         ...(revisions.length ? { revisions } : {}),
       };
     });
@@ -2543,6 +2812,9 @@ async function loadState(ctx: PluginContext): Promise<void> {
         site: String(x.site) || siteOf(String(x.url)),
         name: String(x.name).slice(0, 80),
         url: String(x.url),
+        params: Array.isArray(x.params)
+          ? x.params.map((p) => String(p)).filter(Boolean)
+          : collectionUrlParams(String(x.url)),
         list: {
           scope: String(x.list?.scope ?? ''),
           fields: normalizeCollectFields(x.list?.fields),
@@ -2558,7 +2830,12 @@ async function loadState(ctx: PluginContext): Promise<void> {
               },
             }
           : {}),
-        createdBy: x.createdBy === 'agent' ? ('agent' as const) : ('user' as const),
+        createdBy:
+          x.createdBy === 'agent'
+            ? ('agent' as const)
+            : x.createdBy === 'preset'
+              ? ('preset' as const)
+              : ('user' as const),
         createdAt: Number(x.createdAt) || Date.now(),
         updatedAt: Number(x.updatedAt) || Date.now(),
         uses: Number(x.uses) || 0,
@@ -2576,6 +2853,8 @@ async function loadState(ctx: PluginContext): Promise<void> {
       .filter((x) => x.list.fields.length > 0)
       .slice(0, COLLECTIONS_MAX);
   }
+  // One-time starter recipes; applied ids make deletion permanent.
+  await seedPresets(ctx);
   const settings = s as { private?: boolean; selPopup?: boolean } | undefined;
   privateMode = Boolean(settings?.private);
   // On unless the user turned it off — an absent key is a first run, not a "no".
@@ -2626,10 +2905,15 @@ function recordVisit(url: string, title: string): HistoryEntry | null {
  */
 function pushUrl(ctx: PluginContext, url: string, title?: string, hostTabId?: string): void {
   lastUrl = url;
+  const site = siteOf(url);
   const data = {
     url,
     title: title ?? history.find((e) => e.url === urlKey(url))?.title ?? '',
     favorited: isFavorite(url),
+    // Site-level consent: one bookmark covers the whole registrable domain.
+    site,
+    siteTrusted: trustedSite(site),
+    siteFavoriteCount: favorites.filter((f) => siteOf(f.url) === site).length,
     private: privateMode,
   };
   const target = hostTabId ?? activeHostTab ?? undefined;
@@ -3446,10 +3730,14 @@ plugin({
         );
         if (state?.url) lastUrl = state.url;
         const b = bucketFor(key);
+        const stateSite = siteOf(state?.url ?? '');
         return {
           url: state?.url ?? '',
           title: state?.title ?? '',
           favorited: isFavorite(state?.url ?? ''),
+          site: stateSite,
+          siteTrusted: trustedSite(stateSite),
+          siteFavoriteCount: favorites.filter((f) => siteOf(f.url) === stateSite).length,
           private: privateMode,
           selPopup,
           clips: clips.length,
@@ -3517,6 +3805,22 @@ plugin({
         // the failure it was carrying is about targets that no longer exist.
         target.failures = 0;
         delete target.lastError;
+        // Editing by hand is also the strongest confirmation there is.
+        target.status = 'active';
+        target.confirmedAt = Date.now();
+        target.confirmedBy = 'user';
+        await save(ctx, RECIPES_KEY, recipes, 'recipes');
+        broadcast(ctx, 'ui.recipesChanged', { recipes });
+        return { ok: true };
+      }
+      case 'recipes.promote': {
+        const target = recipes.find((r) => r.id === String(params.id ?? ''));
+        if (!target) return { ok: false, error: 'recipe not found' };
+        target.status = 'active';
+        target.confirmedAt = Date.now();
+        target.confirmedBy = 'user';
+        target.failures = 0;
+        delete target.lastError;
         await save(ctx, RECIPES_KEY, recipes, 'recipes');
         broadcast(ctx, 'ui.recipesChanged', { recipes });
         return { ok: true };
@@ -3549,15 +3853,15 @@ plugin({
         const tabId = targetTabId(key);
         if (!tabId) return { ok: false, error: '这个会话还没有打开网页' };
         const here = await ctx.call<{ url?: string }>('browser.getUrl', { tabId });
-        const where = originOfUrl(here?.url ?? '');
-        if (where !== rec.origin) {
+        const whereUrl = here?.url ?? '';
+        const where = originOfUrl(whereUrl);
+        if (!where || siteOf(whereUrl) !== rec.site) {
           return {
             ok: false,
-            error: `这条配方是给 ${rec.site} 用的，当前页面不在那个网站上`,
-            origin: rec.origin,
+            error: `这条配方是给 ${rec.site} 用的，当前页面不在这个站点`,
+            site: rec.site,
           };
         }
-
         const raw = (params.values && typeof params.values === 'object' ? params.values : {}) as Record<
           string,
           unknown
@@ -3579,6 +3883,18 @@ plugin({
           .filter(Boolean);
         if (needFiles.length) {
           return { ok: false, error: `第 ${needFiles.join('、')} 步要上传文件，先填好本地文件路径`, needFiles };
+        }
+
+        // Same platform, different subdomain/page: the recorded steps were
+        // learned somewhere specific. Start from where they were recorded so
+        // "run" means run, not "hope these selectors exist here".
+        if (where !== rec.origin) {
+          const startPath = rec.paths[0] || '/';
+          await ctx.call(
+            'browser.navigate',
+            { url: `${rec.origin}${startPath}`, tabId },
+            { timeoutMs: NAVIGATE_TIMEOUT_MS },
+          );
         }
 
         const steps = rec.steps.map((st, i) => {
@@ -3677,42 +3993,82 @@ plugin({
           favorited = true;
         }
         await save(ctx, FAVORITES_KEY, favorites, 'favorites');
-        // Unfavoriting ends the long-term relationship: the user's notes stay
-        // (they are authored writing), but the operational ledger goes — it
-        // exists to explain this site's runs, and there are no more of them.
-        if (!favorited) {
-          const origin = originOfUrl(url);
+        const site = siteOf(url);
+        const siteTrusted = trustedSite(site);
+        // Only removing the LAST bookmark of a site withdraws consent; the
+        // ledger goes with it. Notes/recipes stay as data behind the door.
+        if (!siteTrusted) {
           const before = runLog.length;
-          runLog = runLog.filter((r) => r.origin !== origin);
+          runLog = runLog.filter((r) => siteOf(r.origin) !== site);
           if (runLog.length !== before) {
             await save(ctx, SITE_RUNS_KEY, runLog, 'site runs');
-            broadcast(ctx, 'ui.siteRunsChanged', { origin });
+            broadcast(ctx, 'ui.siteRunsChanged', { site });
           }
         }
         // Two panels can be open on the same engine; both stars follow.
         broadcast(ctx, 'ui.favoritesChanged', { favorites });
-        if (url === urlKey(lastUrl)) pushUrl(ctx, lastUrl);
-        return { favorited, url };
+        // Refresh the toolbar even when another page's bookmark changed: site
+        // trust may have just been withdrawn, and the bolt must follow.
+        if (lastUrl) pushUrl(ctx, lastUrl);
+        return {
+          favorited,
+          site,
+          siteTrusted,
+          siteFavoriteCount: favorites.filter((f) => siteOf(f.url) === site).length,
+          url,
+        };
       }
       case 'favorites.remove': {
         const url = urlKey(String(params.url ?? '').trim());
         if (!url) throw new Error('missing url');
         favorites = favorites.filter((f) => urlKey(f.url) !== url);
         await save(ctx, FAVORITES_KEY, favorites, 'favorites');
+        const site = siteOf(url);
+        const siteTrusted = trustedSite(site);
+        if (!siteTrusted) {
+          const before = runLog.length;
+          runLog = runLog.filter((r) => siteOf(r.origin) !== site);
+          if (runLog.length !== before) {
+            await save(ctx, SITE_RUNS_KEY, runLog, 'site runs');
+            broadcast(ctx, 'ui.siteRunsChanged', { site });
+          }
+        }
         broadcast(ctx, 'ui.favoritesChanged', { favorites });
-        if (url === urlKey(lastUrl)) pushUrl(ctx, lastUrl);
-        return { ok: true };
+        if (lastUrl) pushUrl(ctx, lastUrl);
+        return {
+          ok: true,
+          site,
+          siteTrusted,
+          siteFavoriteCount: favorites.filter((f) => siteOf(f.url) === site).length,
+        };
+      }
+      case 'favorites.untrustSite': {
+        // Explicit withdrawal: remove every page bookmark under this site.
+        const site = String(params.site ?? '').trim() || siteOf(String(params.url ?? lastUrl ?? ''));
+        if (!site) throw new Error('missing site');
+        const before = favorites.length;
+        favorites = favorites.filter((f) => siteOf(f.url) !== site);
+        await save(ctx, FAVORITES_KEY, favorites, 'favorites');
+        const runsBefore = runLog.length;
+        runLog = runLog.filter((r) => siteOf(r.origin) !== site);
+        if (runLog.length !== runsBefore) await save(ctx, SITE_RUNS_KEY, runLog, 'site runs');
+        broadcast(ctx, 'ui.favoritesChanged', { favorites });
+        pushUrl(ctx, lastUrl);
+        return { ok: true, site, removed: before - favorites.length, siteTrusted: false };
       }
       case 'siteMemory.list': {
         // The panel asks for the page it shows; '' (a new tab) means nothing
         // to list rather than "whatever was last navigated".
         const url = String(params.url ?? lastUrl ?? '');
         const origin = originOfUrl(url);
+        const site = siteOf(url);
         return {
-          notes: notesFor(origin),
-          site: siteOf(url),
+          notes: notesForSite(site),
+          site,
           origin,
-          favorited: isFavoriteOrigin(origin),
+          favorited: trustedSite(site),
+          siteTrusted: trustedSite(site),
+          siteFavoriteCount: favorites.filter((f) => siteOf(f.url) === site).length,
         };
       }
       case 'siteMemory.add': {
@@ -3753,9 +4109,11 @@ plugin({
       case 'siteMemory.runs': {
         const url = String(params.url ?? lastUrl ?? '');
         const origin = originOfUrl(url);
+        const site = siteOf(url);
         return {
-          runs: runLog.filter((r) => r.origin === origin).slice(0, 20),
+          runs: runLog.filter((r) => siteOf(r.origin) === site).slice(0, 20),
           origin,
+          site,
         };
       }
       // ── Workflows: global, across sites ──
@@ -3797,19 +4155,34 @@ plugin({
       }
       /** Everything the memory center shows, in one round trip. */
       case 'memory.overview': {
-        const origins = new Set<string>();
-        for (const f of favorites) origins.add(originOfUrl(f.url));
-        for (const n of siteNotes) origins.add(n.origin);
-        const sites = [...origins]
+        // Group by SITE, not origin: the permission and the knowledge are
+        // site-wide, so one row is one platform (bilibili.com), not ten
+        // subdomains that each look like a separate site.
+        const sitesSet = new Set<string>();
+        for (const f of favorites) {
+          const site = siteOf(f.url);
+          if (site) sitesSet.add(site);
+        }
+        for (const n of siteNotes) {
+          const site = n.site || siteOf(n.origin);
+          if (site) sitesSet.add(site);
+        }
+        for (const c of collections) if (c.site) sitesSet.add(c.site);
+        for (const r of recipes) if (r.site) sitesSet.add(r.site);
+        const sites = [...sitesSet]
           .filter(Boolean)
-          .map((origin) => ({
-            origin,
-            site: siteOf(origin),
-            favorited: isFavoriteOrigin(origin),
-            notes: notesFor(origin),
-            runs: runLog.filter((r) => r.origin === origin).slice(0, 10),
-            collections: collections.filter((c) => c.site === siteOf(origin)),
-          }))
+          .map((site) => {
+            const fav = favorites.find((f) => siteOf(f.url) === site);
+            const noteOrigin = siteNotes.find((n) => (n.site || siteOf(n.origin)) === site)?.origin;
+            return {
+              origin: fav?.url ?? noteOrigin ?? `https://${site}`,
+              site,
+              favorited: trustedSite(site),
+              notes: notesForSite(site),
+              runs: runLog.filter((r) => siteOf(r.origin) === site).slice(0, 10),
+              collections: collections.filter((c) => c.site === site),
+            };
+          })
           .sort(
             (a, b) => Number(b.favorited) - Number(a.favorited) || a.site.localeCompare(b.site),
           );
@@ -3827,9 +4200,21 @@ plugin({
       case 'collections.run': {
         const collection = collectionById(String(params.id ?? ''));
         if (!collection) return { ok: false, error: '采集配方已经不在了' };
+        if (!trustedSite(collection.site)) {
+          return { ok: false, locked: true, error: `本站还没收藏：收藏 ${collection.site} 后才能使用采集` };
+        }
+        const rawValues = params.values && typeof params.values === 'object' ? params.values : {};
+        const values: Record<string, string> = {};
+        for (const k of Object.keys(rawValues as Record<string, unknown>)) {
+          values[k] = String((rawValues as Record<string, unknown>)[k] ?? '');
+        }
         const tabId = targetTabId(key) ?? (await ensureTab(ctx, key)).id;
-        const result = await runCollection(ctx, collection, tabId);
-        await recordCollectionRun(ctx, collection, result.ok, result.error ?? '');
+        const result = await runCollection(ctx, collection, tabId, values);
+        // A missing-parameter answer is not a failed run: the recipe never
+        // started, so it must not count toward the stale-after-two-failures rule.
+        if (!result.missing?.length) {
+          await recordCollectionRun(ctx, collection, result.ok, result.error ?? '');
+        }
         return { ...result, collection };
       }
       case 'collections.remove': {
@@ -3867,9 +4252,9 @@ plugin({
       default:
         throw new Error(
           `unknown panel method: ${method} (known: nav.open, nav.back, nav.forward, nav.reload, ` +
-            `state.get, omnibox.search, favorites.toggle, favorites.remove, history.clear, ` +
+            `state.get, omnibox.search, favorites.toggle, favorites.remove, favorites.untrustSite, history.clear, ` +
             `sel.theme, settings.setPrivate, settings.setSelPopup, tabs.new, tabs.activate, tabs.close, ` +
-            `tabs.reorder, split.set, recipes.list, recipes.update, recipes.delete, recipes.run, ` +
+            `tabs.reorder, split.set, recipes.list, recipes.update, recipes.promote, recipes.delete, recipes.run, ` +
             `siteMemory.list, siteMemory.add, siteMemory.update, siteMemory.remove, ` +
             `siteMemory.resolve, siteMemory.restore, siteMemory.runs, recipes.restore, ` +
             `workflows.list, workflows.add, workflows.update, workflows.remove, workflows.restore, ` +
@@ -4068,11 +4453,52 @@ plugin({
             ? `\n\n（页面到 ${(result.slowMs / 1000).toFixed(1)}s 才就绪，网络偏慢，但内容已经加载，可以直接继续操作。）`
             : '';
         const head = `已打开 ${finalUrl}${result?.title ? ` — ${result.title}` : ''}${slowNote}`;
+        const origin = originOfUrl(finalUrl);
+        const site = siteOf(finalUrl);
+        // The host's auth flag is a first guess, not the truth: many content
+        // pages carry a "Log in" button and were being labelled a login page,
+        // which suppressed the card and told the agent to stop. Confirm with
+        // the page itself: a password field, a login URL, or a login title.
+        let pageState: { snapshot?: string } | null = null;
+        if (trustedSite(site) || result?.page?.authKind) {
+          try {
+            pageState = await ctx.call<{ snapshot?: string }>('browser.getState', {
+              tabId: tab.id,
+            });
+          } catch {
+            // The page still loaded; auth/card are extras, never a reason to fail.
+          }
+        }
+        const snapshot = String(pageState?.snapshot ?? '');
+        const hasPassword =
+          /type\s*=\s*["']?password/i.test(snapshot) ||
+          (/password/i.test(snapshot) && /(textbox|input)/i.test(snapshot));
+        const path = pathOf(finalUrl);
+        const urlLooksLogin =
+          /\/(login|signin|sign-in|newlogin|auth|passport|sso|session)(\/|$|[?#])/i.test(path) ||
+          /(^|\.)(login|signin|auth|passport)\./i.test(origin.replace(/^https?:\/\//, ''));
+        const titleLooksLogin = /\b(sign[ -]?in|log[ -]?in)\b|登录|登陆/i.test(
+          result?.title ?? '',
+        );
+        const hostAuth = result?.page?.authKind ?? null;
+        // Trust the page over the host's first guess: content pages with a
+        // "Log in" button are not login walls, and phone-code sign-in pages
+        // (no password field) are. Either signal blocks acting.
+        const looksLikeLogin = hasPassword || urlLooksLogin || titleLooksLogin;
+        const effectiveAuth =
+          hostAuth === 'captcha' ? 'captcha' : looksLikeLogin ? 'login' : null;
+        // The page's actionable elements, so the agent can plan from the
+        // element list instead of paying for a full snapshot first. Trusted
+        // SITE only: one bookmark covers every subdomain of that platform.
+        let card = '';
+        if (!effectiveAuth && pageState && trustedSite(site)) {
+          card = pageCardDigest(pageState.snapshot);
+        }
         // Long-term knowledge the user wrote for this site. Only favorited
         // origins inject, and it is placed last so it is the freshest thing
         // in context when the agent starts working.
-        const memo = siteMemoryDigest(originOfUrl(finalUrl));
-        const injectKey = `${sessionKey ?? ''}|${originOfUrl(finalUrl)}`;
+        const memo = siteMemoryDigest(site, origin);
+        const injectKey = `${sessionKey ?? ''}|${site}`;
         if (memo.ids.length) {
           // What this navigation put in front of the agent — the ledger ties a
           // later failure back to exactly these notes.
@@ -4084,30 +4510,40 @@ plugin({
         const compose = (body: string): string => {
           const parts = [head];
           if (body) parts.push(body);
+          if (card) parts.push(card);
           if (memo.text) parts.push(memo.text);
           return parts.join('\n\n');
         };
-        if (result?.page?.authKind === 'captcha') {
+        if (effectiveAuth === 'captcha') {
           return compose(
             '⚠️ 这个页面需要人工完成人机验证。请在右侧浏览器面板里由用户完成；不要尝试点击或绕过。用户完成后再继续。',
           );
         }
-        if (result?.page?.authKind === 'login') {
+        if (effectiveAuth === 'login') {
           return compose(
             '⚠️ 这是一个登录页。登录必须由用户完成（账号密码、短信验证码、扫码都不是 agent 该做的）。请在右侧面板里由用户登录，完成后再继续。',
           );
         }
         const here = pathOf(finalUrl);
-        const nearby = liveRecipes(originOfUrl(finalUrl))
-          .map((r) => ({ r, rank: pathRank(r, here) }))
+        // Consent is site-level; recipes from a sibling subdomain are allowed
+        // but ranked behind same-origin ones. Nothing is offered after the
+        // last bookmark of the site is removed.
+        const nearby = (trustedSite(site) ? liveRecipes(site) : [])
+          .map((r) => ({
+            r,
+            rank: (r.origin === origin ? 0 : 10) + pathRank(r, here),
+            from: r.origin === origin ? '' : `，录制于 ${r.origin.replace(/^https?:\/\//, '')}`,
+          }))
           .sort((x, y) => x.rank - y.rank || y.r.lastOk - x.r.lastOk)
           .slice(0, 5);
         if (nearby.length === 0) return compose('');
-        const where = (rank: number): string =>
-          rank === 0 ? '，本页' : rank === 1 ? '，同栏目' : '';
+        const where = (rank: number): string => {
+          const pathPart = rank >= 10 ? rank - 10 : rank;
+          return pathPart === 0 ? '，本页' : pathPart === 1 ? '，同栏目' : '';
+        };
         return compose(
           `本站有 ${nearby.length} 个已记录的快捷操作：${nearby
-            .map(({ r, rank }) => `${r.name}（${r.steps.length} 步${where(rank)}）`)
+            .map(({ r, rank, from }) => `${r.name}（${r.steps.length} 步${where(rank)}${from}）`)
             .join('、')}。用 browser_recipes 查看步骤，再按 browser_act 执行；某一步的预期对不上就停下自己操作。`,
         );
       }
@@ -4285,6 +4721,7 @@ plugin({
               known.lastOk = Date.now();
               known.failures = 0;
               delete known.lastError;
+              promoteIfEarned(known);
               creditedId = known.id;
             } else {
               known.failures += 1;
@@ -4312,7 +4749,7 @@ plugin({
         // front of the agent when it did. The ids are context for a person,
         // not a verdict — a run can fail for reasons unrelated to memory.
         const runOrigin = originOfUrl(state?.url ?? '');
-        const injection = lastInjected.get(`${sessionKey ?? ''}|${runOrigin}`);
+        const injection = lastInjected.get(`${sessionKey ?? ''}|${siteOf(runOrigin)}`);
         const injectedIds =
           injection && Date.now() - injection.at < INJECTION_TTL_MS ? injection.ids : [];
         await recordRun(ctx, {
@@ -4344,7 +4781,7 @@ plugin({
         }
         const hint =
           failedAt < 0
-            ? memoryLearningHint(sessionKey, originOfUrl(state?.url ?? ''), steps.length)
+            ? memoryLearningHint(sessionKey, siteOf(state?.url ?? ''), steps.length)
             : '';
         return lines.join('\n') + hint;
       }
@@ -4502,6 +4939,8 @@ plugin({
           site
             .map((r) => {
               const stale = r.failures >= 2 ? ' [已失效]' : '';
+              const draft =
+                r.status === 'draft' ? ' [草稿：只成功过一次，等用户确认或再成功一次才启用]' : '';
               // Which step broke last time: without it a retry is a blind guess.
               const broke = r.lastError
                 ? `\n  上次失败在第 ${r.lastError.step} 步：${r.lastError.message}（${formatWhen(
@@ -4511,7 +4950,7 @@ plugin({
               return [
                 `${r.name}（${r.site || r.origin}，${r.paths && r.paths.length ? r.paths.join('、') + ' · ' : ''}${
                   r.steps.length
-                } 步，用过 ${r.uses} 次，上次成功 ${formatWhen(r.lastOk)}）${stale}`,
+                } 步，用过 ${r.uses} 次，上次成功 ${formatWhen(r.lastOk)}）${stale}${draft}`,
                 ...r.steps.map(
                   (st, i) =>
                     `  ${i + 1}. ${st.kind} ${prettyTarget(st.target)}${st.value ? ` = ${st.value}` : ''}${
@@ -4521,7 +4960,8 @@ plugin({
               ].join('\n') + broke;
             })
             .join('\n\n') +
-          '\n\n按 browser_act 的格式执行，把 {{n}} 换成这次的实际值；某一步的预期对不上就立刻停下、自己重新操作。'
+          '\n\n按 browser_act 的格式执行，把 {{n}} 换成这次的实际值；某一步的预期对不上就立刻停下、自己重新操作。' +
+          '标了「草稿」的不要自动执行：它只成功过一次，先让用户在面板里确认。'
         );
       }
 
@@ -4560,9 +5000,9 @@ plugin({
         const url = rawUrl ? normalizeUrl(rawUrl) : lastUrl;
         const origin = originOfUrl(url);
         if (!origin) throw new Error('还没有打开的网页：先 browser_navigate，或传 url');
-        const mine = notesFor(origin);
         const site = siteOf(url) || origin;
-        const favorited = isFavoriteOrigin(origin);
+        const mine = notesForSite(site);
+        const favorited = trustedSite(site);
 
         if (action === 'list') {
           if (mine.length === 0) {
@@ -4731,15 +5171,20 @@ plugin({
                 const detailFields = c.detail
                   ? `，进前 ${c.detail.count} 条取 ${c.detail.fields.map((f) => f.key).join(' / ')}`
                   : '';
+                const locked = trustedSite(c.site) ? '' : ' [未授权：先收藏本站]';
                 const status =
-                  c.failures >= 2
+                  (c.failures >= 2
                     ? ' [已失效]'
                     : c.lastError
                       ? ` [上次失败：${c.lastError.message}]`
                       : c.lastOk
                         ? ` [上次成功 ${formatWhen(c.lastOk)}]`
-                        : '';
-                return `${i + 1}. [${c.id}] ${c.name}（${c.site} · 列表取 ${fields}${detailFields} · 用过 ${c.uses} 次）${status}\n   ${c.url}`;
+                        : '') + locked;
+                const paramNames = c.params ?? collectionUrlParams(c.url);
+                const paramNote = paramNames.length
+                  ? ` · 参数 ${paramNames.join(' / ')}（run 时传 values）`
+                  : '';
+                return `${i + 1}. [${c.id}] ${c.name}（${c.site} · 列表取 ${fields}${detailFields} · 用过 ${c.uses} 次${paramNote}）${status}\n   ${c.url}`;
               })
               .join('\n') +
             '\n\n用 action:"run" 和 id 运行：它在浏览器里真实导航并只返回这些字段，不产生页面快照。' +
@@ -4753,6 +5198,11 @@ plugin({
               .map((f) => f.key)
               .join(' / ')}${collection.detail ? `，进前 ${collection.detail.count} 条取 ${collection.detail.fields.map((f) => f.key).join(' / ')}` : ''}。\n` +
             `立刻用 action:"run" id:"${collection.id}" 跑一次验证；取不到数据就 update 选择器，不要留着坏配方。` +
+            (collection.params?.length
+              ? `这条 URL 带参数 ${collection.params.join(' / ')}，运行时用 values:{${collection.params
+                  .map((p) => `"${p}": "…"`)
+                  .join(', ')}} 填值。`
+              : '') +
             '用户可以在浏览器地址栏下拉的「采集」里一键运行和删除。'
           );
         }
@@ -4767,8 +5217,19 @@ plugin({
         if (action === 'run') {
           const collection = collectionById(String(params.id ?? ''));
           if (!collection) throw new Error('没有找到这个采集配方');
+          if (!trustedSite(collection.site)) {
+            return `采集「${collection.name}」属于 ${collection.site}，但这个站还没收藏。先请用户在浏览器里收藏该站，再运行。`;
+          }
+          const rawValues = params.values && typeof params.values === 'object' ? params.values : {};
+          const values: Record<string, string> = {};
+          for (const k of Object.keys(rawValues as Record<string, unknown>)) {
+            values[k] = String((rawValues as Record<string, unknown>)[k] ?? '');
+          }
           const tab = tid ? { id: tid } : await ensureTab(ctx, bucketKey(sessionKey));
-          const result = await runCollection(ctx, collection, tab.id);
+          const result = await runCollection(ctx, collection, tab.id, values);
+          if (result.missing?.length) {
+            return `采集「${collection.name}」还需要参数：${result.missing.join('、')}。把 values 传成 {\"${result.missing[0]}\": \"…\"} 再跑。`;
+          }
           await recordCollectionRun(ctx, collection, result.ok, result.error ?? '');
           if (!result.ok) {
             return `采集「${collection.name}」失败：${result.error}\n检查一下页面结构是否变了；必要时用 update 修选择器，或者删掉这条。`;
