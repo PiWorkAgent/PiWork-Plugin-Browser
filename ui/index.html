@@ -61,6 +61,7 @@
       stroke-linecap: round;
       stroke-linejoin: round;
     }
+    #toolbar button[hidden] { display: none; }
     #toolbar button:hover { background: hsl(var(--accent, 221 19% 17%)); }
     #toolbar button:active { transform: scale(0.94); }
     #toolbar button:disabled { opacity: 0.4; cursor: default; }
@@ -163,6 +164,10 @@
       overflow: hidden;
     }
     #omnibox[hidden] { display: none; }
+    /* Tools are the same dropdown with different content: a bit taller, and
+       without the navigation footer (private mode / clear history). */
+    #omnibox.tools { max-height: min(480px, 62vh); }
+    #omnibox.tools #omni-foot { display: none; }
     #omni-list { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 0; }
     .sec {
       padding: 5px 12px 3px;
@@ -171,6 +176,48 @@
       color: hsl(var(--muted-foreground, 217 9% 59%));
       user-select: none;
     }
+    /* Site assets (recipes / collections) fold by default: the omnibox is for
+       addresses first, and six preset rows would push history out of sight. */
+    .sec-toggle {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      width: 100%;
+      border: 0;
+      background: transparent;
+      text-align: left;
+      cursor: pointer;
+      padding: 5px 12px 3px;
+      font-size: 11px;
+      letter-spacing: 0.02em;
+      color: hsl(var(--muted-foreground, 217 9% 59%));
+    }
+    .sec-toggle:hover { background: hsl(var(--accent, 221 19% 17%)); }
+    .sec-chev { opacity: 0.7; }
+    .tools-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 7px 12px;
+      margin-bottom: 4px;
+      border-bottom: 1px solid hsl(var(--border, 218 14% 20%));
+      font-size: 11px;
+      color: hsl(var(--muted-foreground, 217 9% 59%));
+    }
+    .tools-bar.danger { color: hsl(0 72% 68%); flex-wrap: wrap; }
+    .tools-bar button {
+      flex: none;
+      border: 1px solid hsl(var(--border, 218 14% 20%));
+      border-radius: 5px;
+      background: transparent;
+      color: inherit;
+      font-size: 11px;
+      padding: 2px 7px;
+      cursor: pointer;
+    }
+    .tools-bar button:hover { background: hsl(var(--accent, 221 19% 17%)); }
     .row { display: flex; align-items: center; gap: 8px; padding: 5px 12px; cursor: pointer; }
     .row.active, .row:hover { background: hsl(var(--accent, 221 19% 17%)); }
     .row-main { flex: 1; min-width: 0; }
@@ -547,6 +594,7 @@
     <button id="btn-forward" title="前进" aria-label="前进"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg></button>
     <button id="btn-reload" title="刷新" aria-label="刷新"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg></button>
     <button id="btn-star" title="收藏此页" aria-label="收藏此页" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></button>
+    <button id="btn-tools" title="本站工具：记忆 · 配方 · 采集 · 运行记录" aria-label="本站工具"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2 4.5 13.5H11l-1 8.5L19.5 10H13z"/></svg></button>
     <button id="btn-imt" title="整页工具：翻译 · 朗读 · 解释 · 分析 · 存正文" aria-label="整页工具" aria-expanded="false" aria-controls="imt-row"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/><path d="M20 3v4"/><path d="M22 5h-4"/><path d="M4 17v2"/><path d="M5 18H3"/></svg><svg class="imt-caret" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button>
     <input id="url" type="text" spellcheck="false" placeholder="输入网址,回车打开" autocomplete="off" />
   </div>
@@ -606,6 +654,7 @@
       var omnibox = document.getElementById('omnibox');
       var list = document.getElementById('omni-list');
       var btnStar = document.getElementById('btn-star');
+      var btnTools = document.getElementById('btn-tools');
       var pageSlot = document.getElementById('page-slot');
       var newtab = document.getElementById('newtab');
       var ntFavs = document.getElementById('nt-favs');
@@ -1049,15 +1098,22 @@
       var state = {
         url: '',
         title: '',
-        favorited: false,
+        favorited: false,       // this PAGE is bookmarked
+        site: '',               // registrable domain on screen
+        siteTrusted: false,     // the SITE is authorized (any bookmark under it)
+        siteFavoriteCount: 0,
+        revokeConfirm: false,
         private: false,
         selPopup: true,
         favorites: [],   // last omnibox.search answer
         history: [],
+        toolsOpen: false, // the site-assets page, not the address dropdown
         recipes: [],     // recorded operations for the CURRENT site
         recipeSite: '',  // registrable domain those recipes belong to
         recipeOrigin: '',
+        recipeOpen: true,   // recipes stay folded: they are assets, not addresses
         collections: [], // deterministic reading recipes for the CURRENT site
+        collectOpen: true,  // same for collections; the header carries the count
         collectView: null, // {id, busy, result, error} while running/showing one
         memory: [],      // long-term notes the user wrote for the CURRENT site
         memorySite: '',
@@ -1112,9 +1168,17 @@
         // textContent here would erase the icon.
         btnStar.classList.toggle('on', state.favorited);
         btnStar.setAttribute('aria-pressed', state.favorited ? 'true' : 'false');
+        // Two scopes, on purpose: the star is THIS PAGE, the bolt is the
+        // SITE. One bookmark authorizes the platform; a sibling subdomain's
+        // star can be hollow while the bolt is still there.
+        var toolsUsable = usable && state.siteTrusted;
+        btnTools.hidden = !toolsUsable;
+        if (!toolsUsable && state.toolsOpen) closeOmnibox();
         btnStar.title = state.favorited
-          ? '取消收藏（本站已记录的快捷方式会保留，可在地址栏删除）'
-          : '收藏此页（收藏后本站重复的操作会记成快捷方式）';
+          ? '取消收藏本页（不会立刻收回本站授权；删掉本站最后一个收藏或在 ⚡ 里取消）'
+          : state.siteTrusted
+            ? '本站已授权；点此收藏本页'
+            : '收藏此页（收藏后授权本站工具：记忆 · 配方 · 采集）';
       }
 
       // ── New-tab page (favorites) ──
@@ -1169,12 +1233,15 @@
       function openOmnibox() {
         if (omnibox.hidden) {
           omnibox.hidden = false;
+          omnibox.classList.toggle('tools', !!state.toolsOpen);
           refreshList();
         }
       }
 
       function closeOmnibox() {
         omnibox.hidden = true;
+        omnibox.classList.remove('tools');
+        state.toolsOpen = false;
         state.active = -1;
         // A test run is a VIEW inside the dropdown, not a mode: closing the
         // dropdown ends it. Leaving it behind replaced the list with the old
@@ -1188,6 +1255,11 @@
 
       function refreshList() {
         var seq = ++searchSeq;
+        // Site-scoped answers (recipes / memory / runs / collections) are keyed
+        // to the page on screen, not to the address query. Dropping them on a
+        // newer keystroke hid a just-created draft until the user typed; only
+        // discard them when the PAGE changed underneath them.
+        var wantedUrl = state.url;
         var pending = window.piSDK.request('omnibox.search', { query: queryOf() })
           .then(function (res) {
             if (seq !== searchSeq) return;  // a newer keystroke already answered
@@ -1202,11 +1274,14 @@
             setActive(state.active);
           })
           .catch(function () {});
-        // Recipes belong to the site on screen, so they are fetched alongside
+        // Only the tools page consumes these; typing an address should not
+        // fire four extra IPC calls.
+        if (state.toolsOpen) {
+                // Recipes belong to the site on screen, so they are fetched alongside
         // and filtered here — the omnibox query itself is about addresses.
         window.piSDK.request('recipes.list', { url: state.url })
           .then(function (rr) {
-            if (seq !== searchSeq) return;
+            if (wantedUrl !== state.url) return;
             state.recipes = (rr && rr.recipes) || [];
             state.recipeSite = (rr && rr.site) || '';
             state.recipeOrigin = (rr && rr.origin) || '';
@@ -1217,7 +1292,7 @@
         // is keyed to the page on screen, not to the address query.
         window.piSDK.request('siteMemory.list', { url: state.url })
           .then(function (mr) {
-            if (seq !== searchSeq) return;
+            if (wantedUrl !== state.url) return;
             state.memory = (mr && mr.notes) || [];
             state.memorySite = (mr && mr.site) || '';
             state.memoryOrigin = (mr && mr.origin) || '';
@@ -1229,7 +1304,7 @@
         // the notes rather than behind another click.
         window.piSDK.request('siteMemory.runs', { url: state.url })
           .then(function (rr) {
-            if (seq !== searchSeq) return;
+            if (wantedUrl !== state.url) return;
             state.runs = (rr && rr.runs) || [];
             renderList();
           })
@@ -1237,11 +1312,12 @@
         // Deterministic reading recipes for the site on screen.
         window.piSDK.request('collections.list', { url: state.url })
           .then(function (cr) {
-            if (seq !== searchSeq) return;
+            if (wantedUrl !== state.url) return;
             state.collections = (cr && cr.collections) || [];
             renderList();
           })
           .catch(function () {});
+        }
         return pending;
       }
 
@@ -1347,10 +1423,35 @@
         var cv = state.collectView;
         var col = state.collections.filter(function (c) { return c.id === cv.id; })[0] || null;
         var head = '<div class="sec">🧲 采集' + (col ? ' · ' + esc(col.name) : '') + '</div>';
+        var params = cv.params || (col && col.params) || [];
+        var paramForm = '';
+        if (params.length) {
+          paramForm = '<div class="run-tip">这条配方需要参数，填好再运行——会真实打开页面，只读取字段。</div>';
+          for (var pi = 0; pi < params.length; pi++) {
+            var pv = String((cv.values && cv.values[params[pi]]) || '');
+            paramForm +=
+              '<label class="re-name-label">' + esc(params[pi]) +
+                '<input class="run-val collect-val" data-param="' + esc(params[pi]) + '" value="' + esc(pv) + '">' +
+              '</label>';
+          }
+        }
+        var actions = function (label) {
+          return '<div class="re-actions">' +
+            (params.length
+              ? '<button class="re-save collect-go"' + (cv.busy ? ' disabled' : '') + '>' + label + '</button>'
+              : '') +
+            '<button class="collect-close">' + (cv.done ? '关闭' : '取消') + '</button>' +
+          '</div>';
+        };
         if (cv.busy) {
           return head +
             '<div class="recipe-run"><div class="run-head">正在运行：会真实打开页面并只读取字段…</div>' +
             '<div class="re-actions"><button class="collect-close">关闭</button></div></div>';
+        }
+        if (cv.prompt) {
+          return head +
+            '<div class="recipe-run">' + paramForm +
+            actions('运行') + '</div>';
         }
         var out = '<div class="recipe-run">';
         if (cv.error) {
@@ -1388,11 +1489,42 @@
           }
           out += '</div>';
         }
-        out += '<div class="re-actions"><button class="collect-close">关闭</button></div></div>';
+        out += paramForm + actions('再运行') + '</div>';
         return head + out;
       }
 
+      // The address dropdown is for navigation only: favorites, history and
+      // the search box. Site assets (memory / recipes / collections) live on
+      // their own page, opened from the toolbar's ⚡ button.
       function renderList() {
+        omnibox.classList.toggle('tools', !!state.toolsOpen);
+        if (state.toolsOpen) {
+          renderSite();
+          return;
+        }
+        var rows = [];
+        var i;
+        if (state.favorites.length) {
+          rows.push('<div class="sec">★ 收藏</div>');
+          for (i = 0; i < state.favorites.length; i++) {
+            rows.push(rowHtml(state.favorites[i], i, true));
+          }
+        }
+        if (state.history.length) {
+          rows.push('<div class="sec">最近访问</div>');
+          for (i = 0; i < state.history.length; i++) {
+            rows.push(rowHtml(state.history[i], state.favorites.length + i, false));
+          }
+        }
+        if (!rows.length) {
+          rows.push('<div class="empty">' +
+            (queryOf() ? '没有匹配的收藏或历史记录' : '收藏和历史记录会出现在这里') +
+            '</div>');
+        }
+        list.innerHTML = rows.join('');
+      }
+
+      function renderSite() {
         var rows = [];
         var i;
 
@@ -1478,11 +1610,20 @@
           return;
         }
 
-        if (state.favorites.length) {
-          rows.push('<div class="sec">★ 收藏</div>');
-          for (i = 0; i < state.favorites.length; i++) {
-            rows.push(rowHtml(state.favorites[i], i, true));
-          }
+        if (state.siteTrusted) {
+          rows.push(
+            state.revokeConfirm
+              ? '<div class="tools-bar danger">' +
+                  '<span>取消后，本站记忆、配方、采集不再提供给 AI；会删除本站 ' +
+                    state.siteFavoriteCount + ' 个收藏。</span>' +
+                  '<button data-revoke-cancel>再想想</button>' +
+                  '<button data-revoke-confirm>确定取消</button>' +
+                '</div>'
+              : '<div class="tools-bar">' +
+                  '<span>本站已授权 · ' + esc(state.site || '') + '</span>' +
+                  '<button data-revoke-site>取消本站授权</button>' +
+                '</div>',
+          );
         }
         // ── Site memory: what the user taught us about this site ──
         // Shown once the site is favorited (an empty slate to write into) or
@@ -1595,7 +1736,7 @@
             '<div class="recipe-note">' +
               (state.memoryFavorited
                 ? 'AI 打开本站时会先看到这些记忆，并知道这是记忆、不是实时页面。'
-                : '本站还没收藏：记忆先存着，收藏后才会提供给 AI。') +
+                : '本站还没授权：记忆先存着，收藏本站后才会提供给 AI。') +
             '</div>'
           );
           if (state.memError) rows.push('<div class="mem-err">' + esc(state.memError) + '</div>');
@@ -1623,14 +1764,20 @@
             })(failedRuns[i]);
           }
         }
-        if (state.history.length) {
-          rows.push('<div class="sec">最近访问</div>');
-          for (i = 0; i < state.history.length; i++) {
-            rows.push(rowHtml(state.history[i], state.favorites.length + i, false));
-          }
-        }
         if (state.recipes.length) {
-          rows.push('<div class="sec">⚡ ' + esc(state.recipeSite || '本站') + ' 配方</div>');
+          var recipeDrafts = 0;
+          for (i = 0; i < state.recipes.length; i++) {
+            if (state.recipes[i].status === 'draft') recipeDrafts += 1;
+          }
+          rows.push(
+            '<button type="button" class="sec sec-toggle" data-toggle-recipe="1" aria-expanded="' +
+              (state.recipeOpen ? 'true' : 'false') + '">' +
+              '<span>⚡ ' + esc(state.recipeSite || '本站') + ' 配方 · ' + state.recipes.length +
+                (recipeDrafts ? ' · ' + recipeDrafts + ' 条草稿' : '') + '</span>' +
+              '<span class="sec-chev">' + (state.recipeOpen ? '▾' : '▸') + '</span>' +
+            '</button>'
+          );
+          if (state.recipeOpen) {
           for (i = 0; i < state.recipes.length; i++) {
             var rec = state.recipes[i];
             var stale = rec.failures >= 2 ? ' · 已失效' : '';
@@ -1638,12 +1785,16 @@
             // is actionable; "已失效" alone sends the user into the editor blind.
             var broke = rec.lastError ? ' · 上次第 ' + rec.lastError.step + ' 步失败' : '';
             var host = rec.origin !== state.recipeOrigin ? esc(rec.origin.replace(/^https?:\/\//, '')) + ' · ' : '';
+            var draft = rec.status === 'draft' ? ' · 草稿（未确认）' : '';
             rows.push(
               '<div class="recipe-row">' +
                 '<div class="row-main">' +
                   '<div class="row-title">' + esc(rec.name) + '</div>' +
-                  '<div class="row-url">' + host + rec.steps.length + ' 步 · 用过 ' + rec.uses + ' 次' + broke + stale + '</div>' +
+                  '<div class="row-url">' + host + rec.steps.length + ' 步 · 用过 ' + rec.uses + ' 次' + broke + stale + draft + '</div>' +
                 '</div>' +
+                (rec.status === 'draft'
+                  ? '<button class="row-x" data-promote="' + esc(rec.id) + '" title="确认这条配方：确认后 AI 打开本站会看到它">✓</button>'
+                  : '') +
                 '<button class="row-x" data-run="' + esc(rec.id) + '" title="运行这条配方（真的执行每一步）">▶</button>' +
                 '<button class="row-x" data-recipe-history="' + esc(rec.id) + '" title="修订历史（可恢复）">↺</button>' +
                 '<button class="row-x" data-edit="' + esc(rec.id) + '" title="编辑这条配方">✎</button>' +
@@ -1651,10 +1802,18 @@
               '</div>'
             );
           }
+          }
         }
         // Deterministic reading recipes: run returns fields, not a page.
         if (state.collections.length) {
-          rows.push('<div class="sec">🧲 采集</div>');
+          rows.push(
+            '<button type="button" class="sec sec-toggle" data-toggle-collect="1" aria-expanded="' +
+              (state.collectOpen ? 'true' : 'false') + '">' +
+              '<span>🧲 采集 · ' + state.collections.length + ' 条</span>' +
+              '<span class="sec-chev">' + (state.collectOpen ? '▾' : '▸') + '</span>' +
+            '</button>'
+          );
+          if (state.collectOpen) {
           for (i = 0; i < state.collections.length; i++) {
             var col = state.collections[i];
             var stale = col.failures >= 2 ? ' · 已失效' : '';
@@ -1663,6 +1822,10 @@
             if (col.detail) {
               spec += ' · 进 ' + col.detail.count + ' 条取 ' + col.detail.fields.map(function (f) { return f.key; }).join('/');
             }
+            if (col.params && col.params.length) {
+              spec += ' · 参数 ' + col.params.join('/');
+            }
+            if (col.createdBy === 'preset') spec += ' · 预置';
             rows.push(
               '<div class="recipe-row">' +
                 '<div class="row-main">' +
@@ -1675,18 +1838,16 @@
               '</div>'
             );
           }
+          }
         }
         // Consent is shown where the recipes appear: this is what favoriting
-        // turned on, and where it can be undone.
-        if (state.favorited) {
-          rows.push('<div class="recipe-note">已收藏本站：成功完成的操作会自动记成快捷方式，条目可在上方删除。</div>');
+        // turned on, and where it can be undone. Folding the section away
+        // should not leave the disclaimer floating on its own.
+        if (state.favorited && state.recipeOpen) {
+          rows.push('<div class="recipe-note">本站已授权：成功完成的操作会自动记成快捷方式，条目可在上方删除。</div>');
         }
         if (!rows.length) {
-          rows.push('<div class="empty">' +
-            (queryOf()
-              ? '没有匹配的收藏或历史记录'
-              : '收藏和历史记录会出现在这里') +
-            '</div>');
+          rows.push('<div class="empty">本站还没有记忆、配方或采集。收藏本站并完成一次操作，或让 AI 建一条采集配方。</div>');
         }
         list.innerHTML = rows.join('');
       }
@@ -1747,7 +1908,7 @@
       omnibox.addEventListener('mousedown', function (e) {
         // The recipe editor and the test runner hold real inputs — they must
         // be able to take focus.
-        if (e.target && e.target.closest && e.target.closest('.recipe-edit, .recipe-run')) return;
+        if (e.target && e.target.closest && e.target.closest('.recipe-edit, .recipe-run, .mem-add')) return;
         e.preventDefault();
       });
 
@@ -1802,7 +1963,7 @@
 
       // Typing must survive a re-render (the address bar asks for the list on
       // every keystroke and each answer repaints it).
-      list.addEventListener('input', function (e) {
+      function handleListInput (e) {
         var el = e.target;
         if (!el || !el.classList) return;
         // Site-memory fields are not part of a recipe run; keep the draft so a
@@ -1811,13 +1972,22 @@
           if (!el.classList.contains('mem-edit-input')) state.memDraft = el.value;
           return;
         }
+        // Collection parameters live in their own view, not in a recipe run.
+        if (el.classList.contains('collect-val')) {
+          if (state.collectView && state.collectView.values) {
+            state.collectView.values[el.getAttribute('data-param')] = el.value;
+          }
+          return;
+        }
         var rn = state.running;
         if (!rn) return;
         if (el.classList.contains('run-val')) rn.values[el.getAttribute('data-token')] = el.value;
         else if (el.classList.contains('run-file')) rn.values['file:' + el.getAttribute('data-step')] = el.value;
-      });
+      }
 
-      list.addEventListener('keydown', function (e) {
+      list.addEventListener('input', handleListInput);
+
+      function handleListKeydown (e) {
         if (e.key !== 'Enter') return;
         var el = e.target;
         if (!el || !el.classList) return;
@@ -1835,8 +2005,14 @@
         } else if (el.classList.contains('mem-input')) {
           e.preventDefault();
           addSiteMemory();
+        } else if (el.classList.contains('collect-val')) {
+          e.preventDefault();
+          var collectGo = list.querySelector('.collect-go');
+          if (collectGo) collectGo.click();
         }
-      });
+      }
+
+      list.addEventListener('keydown', handleListKeydown);
 
       function memFail(err) {
         state.memError = (err && err.message) || String(err);
@@ -1856,8 +2032,49 @@
           .catch(memFail);
       }
 
-      list.addEventListener('click', function (e) {
+      function handleListClick (e) {
         var target = e.target;
+        // ── Fold site assets in/out ──
+        var assetToggle = target.closest
+          ? target.closest('[data-toggle-recipe], [data-toggle-collect]')
+          : null;
+        if (assetToggle) {
+          if (assetToggle.hasAttribute('data-toggle-recipe')) {
+            state.recipeOpen = !state.recipeOpen;
+          } else {
+            state.collectOpen = !state.collectOpen;
+          }
+          renderList();
+          return;
+        }
+        // ── Site authorization: explicit revoke ──
+        var revokeSiteBtn = target.closest ? target.closest('[data-revoke-site]') : null;
+        if (revokeSiteBtn) {
+          state.revokeConfirm = true;
+          renderList();
+          return;
+        }
+        var revokeCancelBtn = target.closest ? target.closest('[data-revoke-cancel]') : null;
+        if (revokeCancelBtn) {
+          state.revokeConfirm = false;
+          renderList();
+          return;
+        }
+        var revokeConfirmBtn = target.closest ? target.closest('[data-revoke-confirm]') : null;
+        if (revokeConfirmBtn) {
+          window.piSDK.request('favorites.untrustSite', { site: state.site })
+            .then(function () {
+              state.siteTrusted = false;
+              state.siteFavoriteCount = 0;
+              state.favorited = false;
+              state.revokeConfirm = false;
+              updateStar();
+              closeOmnibox();
+              refreshList();
+            })
+            .catch(function (err) { state.memError = (err && err.message) || String(err); renderList(); });
+          return;
+        }
         // ── Site memory ──
         var memEditBtn = target.closest ? target.closest('[data-mem-edit]') : null;
         if (memEditBtn) {
@@ -1980,6 +2197,24 @@
         var collectRunBtn = target.closest ? target.closest('[data-collect-run]') : null;
         if (collectRunBtn) {
           var collectId = collectRunBtn.getAttribute('data-collect-run');
+          var collectPick = state.collections.filter(function (c) { return c.id === collectId; })[0] || null;
+          var collectParams = (collectPick && collectPick.params) || [];
+          // A parameterized recipe opens a small form first; nothing navigates
+          // until the user fills the blanks.
+          if (collectParams.length) {
+            state.collectView = {
+              id: collectId,
+              busy: false,
+              result: null,
+              error: '',
+              params: collectParams,
+              values: {},
+              prompt: true,
+              done: false,
+            };
+            renderList();
+            return;
+          }
           state.collectView = { id: collectId, busy: true, result: null, error: '' };
           renderList();
           act('collections.run', { id: collectId }).then(function (res) {
@@ -1988,6 +2223,7 @@
               busy: false,
               result: res || {},
               error: res && res.ok === false ? (res.error || '采集失败') : '',
+              done: true,
             };
             refreshList();
           }).catch(function (err) {
@@ -1996,6 +2232,54 @@
               busy: false,
               result: null,
               error: (err && err.message) || String(err),
+              done: true,
+            };
+            renderList();
+          });
+          return;
+        }
+        var collectGoBtn = target.closest ? target.closest('.collect-go') : null;
+        if (collectGoBtn) {
+          var cv = state.collectView;
+          if (!cv || cv.busy) return;
+          var goValues = {};
+          var goInputs = list.querySelectorAll('.collect-val');
+          for (var gi = 0; gi < goInputs.length; gi++) {
+            goValues[goInputs[gi].getAttribute('data-param')] = goInputs[gi].value;
+          }
+          state.collectView = {
+            id: cv.id,
+            busy: true,
+            result: null,
+            error: '',
+            params: cv.params || [],
+            values: goValues,
+            prompt: false,
+            done: false,
+          };
+          renderList();
+          act('collections.run', { id: cv.id, values: goValues }).then(function (res) {
+            state.collectView = {
+              id: cv.id,
+              busy: false,
+              result: res || {},
+              error: res && res.ok === false ? (res.error || '采集失败') : '',
+              params: cv.params || [],
+              values: goValues,
+              prompt: false,
+              done: true,
+            };
+            refreshList();
+          }).catch(function (err) {
+            state.collectView = {
+              id: cv.id,
+              busy: false,
+              result: null,
+              error: (err && err.message) || String(err),
+              params: cv.params || [],
+              values: goValues,
+              prompt: false,
+              done: true,
             };
             renderList();
           });
@@ -2022,6 +2306,14 @@
           state.recipeHistoryId = '';
           state.editing = state.recipes.filter(function (r) { return r.id === edId; })[0] || null;
           renderList();
+          return;
+        }
+        // ── Confirm a draft ──
+        var promoteBtn = target.closest ? target.closest('[data-promote]') : null;
+        if (promoteBtn) {
+          act('recipes.promote', { id: promoteBtn.getAttribute('data-promote') })
+            .then(refreshList)
+            .catch(memFail);
           return;
         }
         // ── Test run ──
@@ -2096,9 +2388,25 @@
         }
         var row = target.closest ? target.closest('[data-open]') : null;
         if (row) choose(flatItems()[Number(row.getAttribute('data-open'))]);
-      });
+      }
+
+      list.addEventListener('click', handleListClick);
 
       // ── Toolbar ──
+      btnTools.addEventListener('click', function () {
+        if (!state.siteTrusted) return;
+        // Same dropdown as favorites/history, different content. Re-clicking
+        // the bolt (or clicking anywhere outside) folds it away.
+        if (state.toolsOpen && !omnibox.hidden) {
+          closeOmnibox();
+          return;
+        }
+        state.toolsOpen = true;
+        input.blur();
+        openOmnibox();
+        refreshList();
+      });
+
       btnStar.addEventListener('click', function () {
         if (!isRecordable(state.url)) return;
         // Read the prior state BEFORE the request: the backend broadcasts
@@ -2109,7 +2417,10 @@
           .then(function (res) {
             if (res && typeof res.favorited === 'boolean') {
               state.favorited = res.favorited;
+              if (typeof res.siteTrusted === 'boolean') state.siteTrusted = res.siteTrusted;
+              if (typeof res.siteFavoriteCount === 'number') state.siteFavoriteCount = res.siteFavoriteCount;
               updateStar();
+              if (!state.siteTrusted && state.toolsOpen) closeOmnibox();
               // Starring is the consent that turns site memory on. Show where
               // the first line gets written instead of making the user find it.
               // Unstarring only needs the open list repainted: the notes stay.
@@ -2131,13 +2442,16 @@
 
       // ── Address bar ──
       input.addEventListener('focus', function () {
+        if (state.toolsOpen) state.toolsOpen = false;
         openOmnibox();
+        refreshList();
         // Like a real address bar: the first click selects the URL so typing
         // replaces it; clicking again (already focused, so no second focus
         // event) drops the caret where you clicked, for editing it instead.
         input.select();
       });
       input.addEventListener('input', function () {
+        if (state.toolsOpen) state.toolsOpen = false;
         openOmnibox();
         refreshList();
       });
@@ -2173,6 +2487,19 @@
       // Clicking into the page (the native engine view) steals focus without
       // our page hearing a click — window blur is the only signal we get.
       window.addEventListener('blur', closeOmnibox);
+
+      // The tools panel is a dropdown, not a page: a click anywhere else in
+      // the panel folds it. Clicks on the native page arrive as window blur.
+      document.addEventListener('mousedown', function (e) {
+        if (!state.toolsOpen || omnibox.hidden) return;
+        if (omnibox.contains(e.target)) return;
+        if (e.target && e.target.closest && e.target.closest('#btn-tools')) return;
+        closeOmnibox();
+      });
+
+      document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape' && state.toolsOpen) closeOmnibox();
+      });
 
       // ── Footer: private mode + selection popup + clear history ──
       chkPrivate.addEventListener('change', function () {
@@ -2227,11 +2554,19 @@
             state.memEditId = '';
             state.memHistoryId = '';
             state.memError = '';
+            // A real navigation closes the tools page — except the navigation
+            // a run performs itself: the collection/recipe opens its target
+            // page and the user still needs to see the result list.
+            if (!state.collectView && !state.running) state.toolsOpen = false;
           }
           input.value = nextUrl;
           state.url = nextUrl;
           state.title = String(msg.data.title || '');
           state.favorited = msg.data.favorited === true;
+          state.site = String(msg.data.site || '');
+          state.siteTrusted = msg.data.siteTrusted === true;
+          state.siteFavoriteCount = Number(msg.data.siteFavoriteCount) || 0;
+          state.revokeConfirm = false;
           updateStar();
           syncNewTab();
           if (!omnibox.hidden) refreshList();
@@ -2277,6 +2612,9 @@
         state.url = String(s.url || '');
         state.title = String(s.title || '');
         state.favorited = s.favorited === true;
+        state.site = String(s.site || '');
+        state.siteTrusted = s.siteTrusted === true;
+        state.siteFavoriteCount = Number(s.siteFavoriteCount) || 0;
         state.private = s.private === true;
         state.selPopup = s.selPopup !== false;
         state.engineTabId = String(s.engineTabId || s.activeTabId || '');

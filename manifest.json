@@ -231,7 +231,7 @@
       },
       {
         "name": "browser_collect",
-        "description": "Run a saved deterministic reading recipe (a collection): open a fixed URL, extract named fields from a list, and optionally open the first few items to extract detail fields. Returns ONLY the stored fields as compact data — never a page snapshot — so recurring reads cost almost nothing and need no re-analysis. Use it for stable, structured pages read repeatedly (a trending list, a dashboard, a table). Create one only after verifying selectors on the live page with browser_evaluate, and run it once after adding to prove it works. Health: two failed runs mark it stale; fix with update or remove it. Read-only: it navigates and extracts, never clicks or submits.",
+        "description": "Run a saved deterministic reading recipe (a collection): open a fixed URL, extract named fields from a list, and optionally open the first few items to extract detail fields. Returns ONLY the stored fields as compact data — never a page snapshot — so recurring reads cost almost nothing and need no re-analysis. The URL may contain {{name}} placeholders; pass values on run so one recipe works for every keyword. Use it for stable, structured pages read repeatedly (a trending list, a dashboard, a table). Create one only after verifying selectors on the live page with browser_evaluate, and run it once after adding to prove it works. Health: two failed runs mark it stale; fix with update or remove it. Read-only: it navigates and extracts, never clicks or submits.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -244,13 +244,18 @@
               "type": "string",
               "description": "Collection id from list (update / remove / run)."
             },
+            "values": {
+              "type": "object",
+              "additionalProperties": { "type": "string" },
+              "description": "For run: fills the {{name}} placeholders in the collection URL, e.g. {\"关键词\":\"AI\"}. Missing values are reported, not guessed."
+            },
             "name": {
               "type": "string",
               "description": "A short name, e.g. \"每日趋势\" (add / update)."
             },
             "url": {
               "type": "string",
-              "description": "The page the run opens first (add / update)."
+              "description": "The page the run opens first (add / update). May contain {{name}} placeholders, e.g. \"https://site/search?q={{关键词}}\"."
             },
             "list": {
               "type": "object",
